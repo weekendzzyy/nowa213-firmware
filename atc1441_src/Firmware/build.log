@@ -1,0 +1,72 @@
+CC src\app.c
+  -> FAILED
+D:\WorkBuddy\2026-09-03-13-25-10\nowa213\atc1441_src\Firmware\src/app.c: In function 'main_loop':
+D:\WorkBuddy\2026-09-03-13-25-10\nowa213\atc1441_src\Firmware\src/app.c:72:20: error: 'epd_buffer' undeclared (first use in this function)
+D:\WorkBuddy\2026-09-03-13-25-10\nowa213\atc1441_src\Firmware\src/app.c:72:20: note: each undeclared identifier is reported only once for each function it appears in
+
+CC src\app_att.c
+CC src\battery.c
+CC src\ble.c
+CC src\epd_ble_service.c
+CC src\i2c.c
+CC src\cmd_parser.c
+CC src\flash.c
+CC src\time.c
+CC src\epd_spi.c
+CC src\epd.c
+CC src\epd_bw_213.c
+CC src\epd_bwr_213.c
+CC src\epd_bwr_350.c
+CC src\epd_bwy_350.c
+CC src\epd_bw_213_ice.c
+CC src\epd_bwr_154.c
+CC src\ota.c
+CC src\led.c
+CC src\uart.c
+CC src\nfc.c
+CC src\tiffg4.c
+CC src\one_bit_display.c
+CC src\main.c
+CC components\application\app\usbaud.c
+CC components\application\app\usbcdc.c
+CC components\application\app\usbkb.c
+CC components\application\app\usbmouse.c
+CC components\application\keyboard\keyboard.c
+CC components\application\print\putchar.c
+CC components\application\print\u_printf.c
+CC components\application\usbstd\usb.c
+CC components\application\usbstd\usbdesc.c
+CC components\application\usbstd\usbhw.c
+CC components\common\breakpoint.c
+CC components\common\log.c
+CC components\common\selection_sort.c
+CC components\common\string.c
+CC components\common\utility.c
+CC components\vendor\common\blt_common.c
+CC components\vendor\common\blt_fw_sign.c
+CC components\vendor\common\blt_led.c
+CC components\vendor\common\blt_soft_timer.c
+CC components\vendor\common\tl_audio.c
+CC components\tinyFlash\tinyFlash.c
+CC components\drivers\8258\adc.c
+CC components\drivers\8258\aes.c
+CC components\drivers\8258\analog.c
+CC components\drivers\8258\audio.c
+CC components\drivers\8258\bsp.c
+CC components\drivers\8258\clock.c
+CC components\drivers\8258\emi.c
+CC components\drivers\8258\flash.c
+CC components\drivers\8258\gpio_8258.c
+CC components\drivers\8258\i2c.c
+CC components\drivers\8258\lpc.c
+CC components\drivers\8258\qdec.c
+CC components\drivers\8258\rf_pa.c
+CC components\drivers\8258\s7816.c
+CC components\drivers\8258\spi.c
+CC components\drivers\8258\timer.c
+CC components\drivers\8258\uart.c
+CC components\drivers\8258\watchdog.c
+CC static_src\cstartup_825x.S
+CC components\boot\div_mod.S
+
+=== 1 file(s) failed to compile ===

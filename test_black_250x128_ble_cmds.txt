@@ -1,0 +1,3 @@
+Minimal BLE writes to turn the whole screen black (uses opcode 0x00 fill):
+00 00   -> memset(epd_buffer, 0x00)  [entire buffer black]
+01      -> EPD_Display()            [push to panel]

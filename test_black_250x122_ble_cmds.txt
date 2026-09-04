@@ -1,0 +1,5 @@
+// Minimal BLE writes to show SOLID BLACK (no need to send 4000 bytes):
+//   opcode 0x00 + fill byte 0x00  -> memset(epd_buffer, 0x00) = all black
+//   opcode 0x01                  -> EPD_Display() push to screen
+00 00
+01
