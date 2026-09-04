@@ -29,3 +29,7 @@ Desktop.ini
 # ---- Corrupt factory backup (currently 0 bytes / lost) ----
 # Re-create from another unit if factory restore is ever needed.
 TlsrComSwireWriter/nowa213_original_backup.bin
+
+# ---- EPD image tool generated previews / demo files ----
+epd_preview/
+*_demo.png
