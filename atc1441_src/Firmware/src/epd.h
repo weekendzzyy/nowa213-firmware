@@ -4,10 +4,13 @@
 #define epd_width 200
 #define epd_buffer_size ((epd_height/8) * epd_width)
 
-// Real on-screen dimensions used by the BW213 panel (250x122 physical, padded to
-// 250x128 so the vertical axis is a whole number of bytes).
+// Real on-screen dimensions used by the BW213 panel.
+// The physical glass exposes ~250x122 rows; the storage buffer is padded to
+// 250x128 because each column is stored as whole bytes (16 bytes/column).
+// The bottom (128 - 122) = 6 storage rows are off-screen and should be white.
 #define EPD_DISPLAY_WIDTH   250
-#define EPD_DISPLAY_HEIGHT  128
+#define EPD_DISPLAY_HEIGHT  128          // storage / transfer height (byte-aligned)
+#define EPD_VISIBLE_HEIGHT  122          // physical glass height (do not draw content here)
 #define EPD_DISPLAY_SIZE    ((EPD_DISPLAY_WIDTH) * (EPD_DISPLAY_HEIGHT) / 8)  // 4000 bytes
 
 // ============================================================================

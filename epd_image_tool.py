@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# Nowa-213R-N (TLSR8359 + BW213, 250x128) EPD image helper
+# Nowa-213R-N (TLSR8359 + BW213, 250x122 visible / 250x128 storage) EPD image helper
 # -----------------------------------------------------------------------------
 # Two fast ways to verify an image WITHOUT the slow "flash -> BLE upload -> look"
 # loop:
@@ -19,7 +19,11 @@
 #      reflash, no BLE upload.
 #
 # Framebuffer layout (matches firmware epd.c / epd_ble_service.c):
-#   4000 bytes = 250 columns x 16 bytes/column (128 rows / 8 bits per byte)
+#   4000 bytes = 250 columns x 16 bytes/column (128 storage rows / 8 bits per byte)
+#   The physical glass only exposes ~122 rows; rows 122..127 are off-screen and
+#   are kept white by this tool so content in the visible 250x122 area is not
+#   clipped.  Input images are resized/cropped to 250x122 and top-aligned in the
+#   250x128 storage buffer.
 #   column c      -> bytes [c*16 .. c*16+15]
 #   row y in col  -> byte index (y//8), bit (7 - (y % 8))
 #   0x00 = BLACK pixel, 0xFF = WHITE pixel   (epd.c: memset(epd_buffer,0xff)=white)
@@ -32,14 +36,18 @@
 import os, sys, argparse, subprocess
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 250, 128
-FB = W * (H // 8)          # 4000
-MAGIC = b'IMG1'            # little-endian 0x31474D49, written LAST by firmware
+W, H = 250, 128          # storage dimensions (byte-aligned whole rows)
+VISIBLE_H = 122          # physical glass exposes ~122 rows; bottom 6 are off-panel
+FB = W * (H // 8)        # 4000 bytes storage
+MAGIC = b'IMG1'          # little-endian 0x31474D49, written LAST by firmware
 
 def image_to_framebuffer(path, invert=False):
-    """Load an image, resize to 250x128, threshold to 1bpp EPD framebuffer.
+    """Load an image, fit it to the VISIBLE 250x122 area, then pad to the
+    250x128 storage buffer (white rows at the bottom correspond to off-panel area).
     dark pixel -> 0 (black), light pixel -> 1 (white)."""
-    img = Image.open(path).convert('L').resize((W, H))
+    src = Image.open(path).convert('L').resize((W, VISIBLE_H))
+    img = Image.new('L', (W, H), 255)   # white background for off-panel rows
+    img.paste(src, (0, 0))
     buf = bytearray(FB)
     for col in range(W):
         for row in range(H):
@@ -69,10 +77,11 @@ def flip_horizontal(buf):
     return bytes(out)
 
 def framebuffer_to_image(buf):
-    img = Image.new('L', (W, H), 255)
+    """Render the VISIBLE 250x122 area (matches what you see on the glass)."""
+    img = Image.new('L', (W, VISIBLE_H), 255)
     px = img.load()
     for col in range(W):
-        for row in range(H):
+        for row in range(VISIBLE_H):
             byte = buf[col * 16 + row // 8]
             bit = (byte >> (7 - (row % 8))) & 1
             px[col, row] = 0 if bit == 0 else 255
@@ -99,9 +108,9 @@ def render_previews(buf, outdir, name):
     v3p = os.path.join(outdir, f'{name}_v3_fixed.png'); v3.save(v3p)
     v2p = os.path.join(outdir, f'{name}_v2_buggy.png');  v2.save(v2p)
     pad = 16
-    combo = Image.new('L', (W * 2 + pad, H + 16), 255)
-    combo.paste(v3.crop((0, 16, W, H + 16)), (0, 16))
-    combo.paste(v2.crop((0, 16, W, H + 16)), (W + pad, 16))
+    combo = Image.new('L', (W * 2 + pad, VISIBLE_H + 16), 255)
+    combo.paste(v3.crop((0, 16, W, VISIBLE_H + 16)), (0, 16))
+    combo.paste(v2.crop((0, 16, W, VISIBLE_H + 16)), (W + pad, 16))
     combop = os.path.join(outdir, f'{name}_compare.png'); combo.save(combop)
     return v3p, v2p, combop
 
@@ -117,7 +126,7 @@ def bake_sector(buf, outdir, name):
     return path
 
 def main():
-    ap = argparse.ArgumentParser(description='Nowa-213R-N EPD image helper')
+    ap = argparse.ArgumentParser(description='Nowa-213R-N EPD image helper (250x122 visible)')
     ap.add_argument('input', help='image (png/jpg/bmp) OR raw .bin framebuffer')
     ap.add_argument('--outdir', default='epd_preview')
     ap.add_argument('--name', default='img')
