@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nowa-213R-N 上传器 + 校时</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 16px; }
+  button { padding: 8px 14px; margin: 4px; cursor: pointer; }
+  #preview { border: 1px solid #888; image-rendering: pixelated; width: 500px; height: 244px; background:#fff; }
+  #log { white-space: pre-wrap; font-family: monospace; font-size: 12px; margin-top: 8px; max-height: 200px; overflow: auto; background:#f4f4f4; padding:6px; }
+  .hint { color:#555; font-size:13px; }
+</style>
+</head>
+<body>
+<h2>Nowa-213R-N 图片上传 + 时间同步</h2>
+<p class="hint">用法：在本目录运行 <code>python -m http.server 8000</code>，浏览器打开
+<a href="http://localhost:8000/web_uploader.html">http://localhost:8000/web_uploader.html</a>
+（WebBLE 需要 localhost/https 安全环境，不能直接双击 file:// 打开）。</p>
+
+<button id="connectBtn">连接</button>
+<button id="reconnectBtn">重连</button>
+<span id="connState">未连接</span>
+<br><br>
+
+<input type="file" id="fileInput" accept="image/*">
+<button id="loadBtn">载入图片</button>
+<br>
+<canvas id="preview" width="250" height="122"></canvas>
+<p class="hint">预览 = 屏幕上最终显示的样子（已含固件列翻转）。下方黑色块 = 该区域为黑。</p>
+
+<br>
+<button id="uploadBtn">上传图片 (BLE)</button>
+<button id="timeBtn">同步时间</button>
+<button id="bothBtn">上传 + 同步时间</button>
+<br>
+<div id="status"></div>
+<div id="log"></div>
+
+<script>
+// ---- BLE UUIDs (verified against firmware GATT table) ----
+const EPD_SERVICE = '13187b10-eba9-a3ba-044e-83d3217d9a38';
+const EPD_CHAR    = '4b646063-6264-f3a7-8941-e65356ea82fe';
+const RXTX_SERVICE = '1f10';   // short UUID -> 00001f10-...
+const RXTX_CHAR    = '1f1f';
+
+// ---- panel geometry ----
+const W = 250, H_VISIBLE = 122, H_STORAGE = 128;
+const FB = W * (H_STORAGE / 8);  // 4000 bytes
+
+// ---- timezone offset for the displayed clock (firmware shows get_time() as HH:MM in UTC) ----
+// User is in China (UTC+8). Send UTC+8 so the tag shows Beijing time. Change if needed.
+const TZ_OFFSET_SECONDS = 8 * 3600;
+
+let device = null, server = null, epdChar = null, rxtxChar = null;
+
+function log(s){ document.getElementById('log').textContent += s + '\n'; }
+function setStatus(s){ document.getElementById('status').textContent = s; }
+function setConn(s){ document.getElementById('connState').textContent = s; }
+
+function hexToBytes(hex){
+  const b = [];
+  for (let c = 0; c < hex.length; c += 2) b.push(parseInt(hex.substr(c,2),16));
+  return new Uint8Array(b);
+}
+
+async function connect(){
+  try{
+    device = await navigator.bluetooth.requestDevice({
+      optionalServices: [EPD_SERVICE, RXTX_SERVICE],
+      acceptAllDevices: true
+    });
+    device.addEventListener('gattserverdisconnected', () => setConn('已断开'));
+    server = await device.gatt.connect();
+    setConn('已连接: ' + (device.name || '???'));
+
+    const svc = await server.getPrimaryService(EPD_SERVICE);
+    epdChar = await svc.getCharacteristic(EPD_CHAR);
+    log('EPD_BLE 特征已就绪（传图）');
+
+    try{
+      const svc2 = await server.getPrimaryService(RXTX_SERVICE);
+      rxtxChar = await svc2.getCharacteristic(RXTX_CHAR);
+      log('RxTx 特征已就绪（校时 0xDD）');
+    }catch(e){
+      rxtxChar = null;
+      log('警告：未找到 RxTx 特征，校时按钮不可用。' + e);
+    }
+  }catch(e){
+    setConn('连接失败');
+    log('连接错误: ' + e);
+  }
+}
+
+// Convert a loaded <img> to the 250x122-framebuffer byte layout the firmware expects.
+// Layout (matches epd.c / epd_image_tool.py): byte = col*16 + (row>>3); MSB(top). 0x00=BLACK, 0xFF=WHITE.
+// The firmware's 0x01 handler flips columns, so this natural layout shows correctly on glass.
+function imageToFramebuffer(img){
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H_STORAGE;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H_STORAGE);  // off-panel rows stay white
+  // contain-fit the image into the visible 250x122 area
+  const scale = Math.min(W / img.width, H_VISIBLE / img.height);
+  const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+  const dx = Math.round((W - dw) / 2), dy = Math.round((H_VISIBLE - dh) / 2);
+  ctx.drawImage(img, dx, dy, dw, dh);
+
+  const data = ctx.getImageData(0, 0, W, H_STORAGE).data;
+  const buf = new Uint8Array(FB).fill(0xFF);  // all white
+  for (let y = 0; y < H_VISIBLE; y++){
+    for (let x = 0; x < W; x++){
+      const i = (y * W + x) * 4;
+      const lum = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+      if (lum < 128){  // black -> clear bit
+        buf[x * 16 + (y >> 3)] &= ~(0x80 >> (y & 7));
+      }
+    }
+  }
+  return buf;
+}
+
+// Render the FINAL on-screen appearance for preview verification.
+// The firmware flips columns once (user_image_flip_horizontal) and the BW213 panel
+// scans right-to-left, so the two cancels and the glass shows buf AS-IS (natural).
+// => preview renders buf directly (column x -> screen column x), no extra flip.
+function drawPreview(buf){
+  const cv = document.getElementById('preview');
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H_VISIBLE);
+  for (let y = 0; y < H_VISIBLE; y++){
+    for (let x = 0; x < W; x++){
+      const byte = buf[x * 16 + (y >> 3)];
+      const bit = (byte >> (7 - (y & 7))) & 1;
+      const v = bit ? 255 : 0;
+      const i = (y * W + x) * 4;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v; img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+let currentBuf = null;
+document.getElementById('loadBtn').onclick = () => {
+  const f = document.getElementById('fileInput').files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => { currentBuf = imageToFramebuffer(img); drawPreview(currentBuf); log('图片已载入并打包（4000 字节）'); };
+  img.src = URL.createObjectURL(f);
+};
+
+async function sendImage(buf){
+  if (!epdChar) throw new Error('未连接 EPD_BLE');
+  const hex = Array.from(buf, b => ('0'+b.toString(16)).slice(-2)).join('');
+  await epdChar.writeValue(hexToBytes('0000'));   // clear buffer to black
+  await epdChar.writeValue(hexToBytes('020000')); // set byte_pos = 0
+  for (let off = 0; off < hex.length; off += 480){
+    const chunk = hex.substr(off, 480);            // 240 bytes per write
+    await epdChar.writeValue(hexToBytes('03' + chunk));
+  }
+  await epdChar.writeValue(hexToBytes('01'));      // display + save to flash
+}
+
+async function syncTime(){
+  if (!rxtxChar) throw new Error('未连接 RxTx 特征');
+  const t = Math.floor(Date.now()/1000) + TZ_OFFSET_SECONDS;
+  const cmd = new Uint8Array([0xDD,
+    (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]);
+  await rxtxChar.writeValue(cmd);
+  const d = new Date((t*1000));
+  return d.toLocaleString();
+}
+
+document.getElementById('connectBtn').onclick = connect;
+document.getElementById('reconnectBtn').onclick = () => { if (device) device.gatt.connect().then(connect); };
+
+document.getElementById('uploadBtn').onclick = async () => {
+  if (!currentBuf) return setStatus('请先载入图片');
+  try{ setStatus('上传中...'); await sendImage(currentBuf); setStatus('上传完成'); log('图片已发送'); }
+  catch(e){ setStatus('上传失败'); log('上传错误: '+e); }
+};
+
+document.getElementById('timeBtn').onclick = async () => {
+  try{ setStatus('校时中...'); const when = await syncTime(); setStatus('校时完成'); log('时间已设置为(本地): '+when);
+       log('屏幕将在下一分钟交替时显示新时间（或再点一次上传刷新屏幕）'); }
+  catch(e){ setStatus('校时失败'); log('校时错误: '+e); }
+};
+
+document.getElementById('bothBtn').onclick = async () => {
+  if (!currentBuf) return setStatus('请先载入图片');
+  try{
+    setStatus('上传 + 校时中...');
+    await sendImage(currentBuf);
+    const when = await syncTime();
+    setStatus('上传 + 校时完成');
+    log('图片已发送，时间已设置为(本地): '+when);
+    log('屏幕将在下一分钟交替时显示新时间');
+  }catch(e){ setStatus('失败'); log('错误: '+e); }
+};
+</script>
+</body>
+</html>
