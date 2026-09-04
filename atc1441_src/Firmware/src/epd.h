@@ -4,6 +4,12 @@
 #define epd_width 200
 #define epd_buffer_size ((epd_height/8) * epd_width)
 
+// Real on-screen dimensions used by the BW213 panel (250x122 physical, padded to
+// 250x128 so the vertical axis is a whole number of bytes).
+#define EPD_DISPLAY_WIDTH   250
+#define EPD_DISPLAY_HEIGHT  128
+#define EPD_DISPLAY_SIZE    ((EPD_DISPLAY_WIDTH) * (EPD_DISPLAY_HEIGHT) / 8)  // 4000 bytes
+
 // ============================================================================
 // FEATURE: Time <-> User-Image alternation (switches every minute)
 // ----------------------------------------------------------------------------
@@ -23,6 +29,7 @@ extern uint8_t display_toggle;                     // alternation phase: 0 = tim
 void user_image_check_flash(void);  // at boot: read magic, set has_user_image
 void user_image_save(void);         // on BLE upload: erase sector + write image + magic
 void user_image_restore(void);      // read saved image from flash into epd_buffer
+void user_image_flip_horizontal(void); // mirror columns to cancel EPD's default scan direction
 
 void set_EPD_model(uint8_t model_nr);
 void init_epd(void);

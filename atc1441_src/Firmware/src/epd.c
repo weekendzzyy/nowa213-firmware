@@ -45,7 +45,7 @@ TIFFIMAGE tiff;
 // On-flash layout (4KB sector):
 //   [0x00..0x03] magic "IMG1" (LE) -> validity flag, written LAST so a power loss
 //                                 mid-write leaves the old (still valid) magic intact
-//   [0x04..0xFFF] 4096 bytes      -> copy of epd_buffer (the display framebuffer)
+//   [0x04..0x04+EPD_DISPLAY_SIZE-1] -> copy of epd_buffer (the display framebuffer)
 RAM uint32_t user_image_magic_word = 0x31474D49; // "IMG1" little-endian
 
 // Read the magic at boot; sets has_user_image so main_loop knows whether to alternate.
@@ -56,12 +56,36 @@ void user_image_check_flash(void)
 	has_user_image = (magic == user_image_magic_word) ? 1 : 0;
 }
 
+// The BW213 controller's default data-entry mode scans columns right-to-left,
+// which horizontally mirrors any image that is sent in natural left-to-right
+// column order. FixBuffer() (used for the time/status screen) already mirrors
+// the source once, so the double mirror cancels out and the clock is readable.
+// User images uploaded over BLE are in natural left-to-right column order, so we
+// must mirror them before display/save to get the same cancellation.
+void user_image_flip_horizontal(void)
+{
+	int col, byte_y;
+	uint8_t tmp;
+	int bytes_per_col = EPD_DISPLAY_HEIGHT / 8;
+	for (col = 0; col < EPD_DISPLAY_WIDTH / 2; col++)
+	{
+		int left = col * bytes_per_col;
+		int right = (EPD_DISPLAY_WIDTH - 1 - col) * bytes_per_col;
+		for (byte_y = 0; byte_y < bytes_per_col; byte_y++)
+		{
+			tmp = epd_buffer[left + byte_y];
+			epd_buffer[left + byte_y] = epd_buffer[right + byte_y];
+			epd_buffer[right + byte_y] = tmp;
+		}
+	}
+}
+
 // Persist the current epd_buffer to flash. Called after every BLE image upload
 // (opcode 0x01). Magic is written last so an interrupted erase/write is recoverable.
 void user_image_save(void)
 {
 	flash_erase_sector(USER_IMG_FLASH_ADDR);                              // 1) wipe the 4KB sector
-	flash_write_page(USER_IMG_FLASH_ADDR + 4, 4096, epd_buffer);          // 2) write pixels
+	flash_write_page(USER_IMG_FLASH_ADDR + 4, EPD_DISPLAY_SIZE, epd_buffer); // 2) write pixels
 	flash_write_page(USER_IMG_FLASH_ADDR, 4, (uint8_t *)&user_image_magic_word); // 3) mark valid
 	has_user_image = 1;
 }
@@ -69,7 +93,7 @@ void user_image_save(void)
 // Load the saved image from flash back into epd_buffer for display.
 void user_image_restore(void)
 {
-	flash_read_page(USER_IMG_FLASH_ADDR + 4, 4096, epd_buffer);
+	flash_read_page(USER_IMG_FLASH_ADDR + 4, EPD_DISPLAY_SIZE, epd_buffer);
 }
 
 // With this we can force a display if it wasnt detected correctly

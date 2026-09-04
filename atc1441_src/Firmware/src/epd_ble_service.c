@@ -37,8 +37,11 @@ int epd_ble_handle_write(void *p)
 	// Push buffer to display, then persist it for the alternation feature.
 	case 0x01:
 		ble_set_connection_speed(200);
-		EPD_Display(epd_buffer, epd_buffer_size, 1); // show the just-uploaded image now
-		user_image_save(); // save to flash: survives reset/sleep and is shown in the next alternation phase
+		// Mirror the uploaded image so the EPD's right-to-left column scan shows
+		// it in the same orientation as the web tool preview.
+		user_image_flip_horizontal();
+		EPD_Display(epd_buffer, EPD_DISPLAY_SIZE, 1); // show the just-uploaded image now
+		user_image_save(); // save mirrored image to flash for the next alternation phase
 		return 0;
 	// Set byte_pos.
 	case 0x02:

@@ -32,3 +32,33 @@
 
 > ⚠️ 汉朔原厂固件备份 `nowa213_original_backup.bin` 已损坏为 0 字节（丢失），
 > 无法用于恢复原厂界面；如需原厂请从另一台同型号价签重新备份。
+
+---
+
+## v3.0 — 2026-09-04
+
+**功能**：修复 BLE 上传图片的两个显示问题（相对 v2.0）。
+- 水平翻转（镜像）：BW213 控制器默认列扫描为右→左，用户图未抵消该镜像，
+  显示成左右镜像。新增 `user_image_flip_horizontal()`，在推送/保存前对图像做
+  水平镜像，与时间页（FixBuffer 已镜像一次）行为一致。
+- 右侧黑边：v2.0 推送/恢复时按 `epd_buffer_size`（5000 字节）发送，而实际屏
+  面积为 250×128/8 = 4000 字节，多发的 1000 字节被渲染为右侧黑块。改为按
+  新增宏 `EPD_DISPLAY_SIZE`（4000）发送与保存。
+
+**改动文件**（`atc1441_src/Firmware/src/`）：
+- `epd.h` — 新增 `EPD_DISPLAY_WIDTH/HEIGHT/SIZE` 宏；声明 `user_image_flip_horizontal()`
+- `epd.c` — 新增 `user_image_flip_horizontal()`；`user_image_save/restore` 改用 `EPD_DISPLAY_SIZE`
+- `epd_ble_service.c` — opcode `0x01` 推送前调用 `user_image_flip_horizontal()`，
+  显示尺寸改为 `EPD_DISPLAY_SIZE`
+- `app.c` — 每分钟恢复显示用户图时尺寸改为 `EPD_DISPLAY_SIZE`
+
+**发布文件**：`firmware_releases/atc1441_alternate_flashimg_v3.0_2026-09-04_91052B.bin`
+**SHA256**：`e84de57fb619c3edad5b8f7469c600846fc28e577bf70721bcd32622a40993f0`
+**大小**：91052 字节
+
+**烧录**：`python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <上述文件>`
+
+> ⚠️ 升级提示：v3 改变了 Flash 中用户图的存储尺寸（v2 存 4096 字节，v3 存
+> 4000 字节，布局仍从 `0x79000+4` 起、magic 不变）。旧 v2 存的用户图在 v3 下
+> 仍可被 `user_image_restore` 读回前 4000 字节正确显示，无需重传；但建议重传
+> 一次图片使镜像方向正确（v2 存的是未镜像图，v3 会再镜像一次导致反向镜像）。

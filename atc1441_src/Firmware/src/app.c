@@ -72,7 +72,7 @@ _attribute_ram_code_ void main_loop(void)
         {
             // phase 1: show the uploaded image (restored from flash)
             user_image_restore(); // load saved pixels into epd_buffer
-            EPD_Display(epd_buffer, epd_buffer_size, 1);
+            EPD_Display(epd_buffer, EPD_DISPLAY_SIZE, 1);
             display_toggle = 0; // next minute -> time/status
         }
         else
