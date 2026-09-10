@@ -186,8 +186,13 @@ async function syncTime(){
   const cmd = new Uint8Array([0xDD,
     (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]);
   await rxtxChar.writeValue(cmd);
-  const d = new Date((t*1000));
-  return d.toLocaleString();
+  // `t` is ALREADY shifted into the tag's local time (firmware applies no offset
+  // of its own). Render it back with getUTC* so the browser's own timezone is not
+  // applied a second time — otherwise the log shows a double-shifted clock.
+  const d = new Date(t * 1000);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())} ` +
+         `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())} (UTC+8)`;
 }
 
 document.getElementById('connectBtn').onclick = connect;
@@ -200,8 +205,8 @@ document.getElementById('uploadBtn').onclick = async () => {
 };
 
 document.getElementById('timeBtn').onclick = async () => {
-  try{ setStatus('校时中...'); const when = await syncTime(); setStatus('校时完成'); log('时间已设置为(本地): '+when);
-       log('屏幕将在下一分钟交替时显示新时间（或再点一次上传刷新屏幕）'); }
+  try{ setStatus('校时中...'); const when = await syncTime(); setStatus('校时完成'); log('时间已设置为(价签将显示): '+when);
+       log('屏幕将在下一分钟的整分刷新时显示新时间（或再点一次“上传图片”立即刷新）'); }
   catch(e){ setStatus('校时失败'); log('校时错误: '+e); }
 };
 
@@ -212,8 +217,8 @@ document.getElementById('bothBtn').onclick = async () => {
     await sendImage(currentBuf);
     const when = await syncTime();
     setStatus('上传 + 校时完成');
-    log('图片已发送，时间已设置为(本地): '+when);
-    log('屏幕将在下一分钟交替时显示新时间');
+    log('图片已发送，时间已设置为(价签将显示): '+when);
+    log('注意：v4.0 固件为纯时钟模式，图片只显示一次，下一分钟自动回到时钟');
   }catch(e){ setStatus('失败'); log('错误: '+e); }
 };
 </script>

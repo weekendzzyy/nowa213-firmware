@@ -146,3 +146,31 @@
   因此 5 字节的 `0xDD + 时间戳` 不会被截断；`cmd_parser.c` 正是从 `req->dat[1..4]` 组装时间。
 - 时区不会被二次叠加：固件 `app.c` 直接用 `get_time()` 做 `%24` / `%60` 取时分，不施加任何
   偏移，故工具发送 `Date.now()/1000 + 8*3600`（东八区本地时间）是正确的。
+
+---
+
+## v4.0 — 2026-09-10（纯时钟模式）
+
+**需求**：不再需要「时间 ↔ 图片」每分钟交替，价签一直显示时间。
+
+**改动**（`atc1441_src/Firmware/src/app.c`）：
+- `main_loop()` 的整分 tick 里删除交替分支，直接 `epd_display(get_time(), ...)`，
+  即每分钟只重绘时间/状态页。
+- `user_init_normal()` 中注释掉 `user_image_check_flash()`（不再需要启动时读 flash 标志）。
+- 保留 `epd.c` 中的 `user_image_*` 与 `epd_ble_service.c` 的 0x01 路径不变：
+  BLE 上传的图片仍会**立即显示一次**，下一分钟整分刷新时自动回到时钟。
+- 代码内留下注释说明如何恢复交替功能（重新调用 `user_image_check_flash()` +
+  在整分分支里按 `has_user_image && display_toggle` 分流）。
+
+**构建**：`_end_bss_ = 0x84efc1`（栈顶 0x850000，余量 4159 B，与 v3.0 相同，无 SRAM 风险）。
+
+**发布文件**：`firmware_releases/atc1441_clockonly_v4.0_2026-09-10_90988B.bin`
+**SHA256**：`dfafb06bb668c54b4b88d63b7819dcb08d1f24cf2ac7daf33d298a3f3493b2aa`
+**大小**：90988 字节
+
+**烧录**：`python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <上述文件>`
+
+**另修（`web_uploader.html`）**：校时日志时间显示错误。`t` 已是「UTC+8 的 epoch」，
+原代码再用 `toLocaleString()` 按浏览器本地时区渲染 → 二次加 8 小时（显示 22:09 而实际 14:09）。
+改为用 `getUTC*` 拼字符串输出，并标注 `(UTC+8)`。**写入设备的时间戳本身一直是对的**，
+固件 `time.c` 存原始值、`app.c` 用 `%24`/`%60` 取值，不施加任何时区偏移。

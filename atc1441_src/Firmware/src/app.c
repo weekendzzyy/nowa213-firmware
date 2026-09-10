@@ -31,7 +31,9 @@ _attribute_ram_code_ void user_init_normal(void)
     init_ble();
     init_flash();
     init_nfc();
-    user_image_check_flash(); // has_user_image = 1 if a saved image exists in flash
+    // v4.0 clock-only: the user-image alternation is disabled, so the flash
+    // image check is no longer needed at boot (see main_loop comment).
+    // user_image_check_flash();
 
     // epd_display_tiff((uint8_t *)bart_tif, sizeof(bart_tif));
     // epd_display(3334533);
@@ -67,21 +69,17 @@ _attribute_ram_code_ void main_loop(void)
         uint8_t full = (current_hour != hour_refresh) ? 1 : 0;
         hour_refresh = current_hour;
 
-        // --- Time <-> user-image alternation (runs once per minute) ---
-        if (has_user_image && display_toggle)
-        {
-            // phase 1: show the uploaded image (restored from flash)
-            user_image_restore(); // load saved pixels into epd_buffer
-            EPD_Display(epd_buffer, EPD_DISPLAY_SIZE, 1);
-            display_toggle = 0; // next minute -> time/status
-        }
-        else
-        {
-            // phase 0: show the live time / status screen
-            epd_display(get_time(), battery_mv, temperature, full);
-            if (has_user_image)
-                display_toggle = 1; // next minute -> user image (only if one exists)
-        }
+        // ------------------------------------------------------------------
+        // Clock-only mode (v4.0).
+        // The previous time<->image alternation was removed on request: the tag
+        // now always renders the live clock / status screen on the minute tick.
+        // A BLE-uploaded image is still shown ONCE immediately by the 0x01
+        // handler in epd_ble_service.c; the next minute tick returns the glass
+        // to the clock.
+        // To restore alternation later: re-add `user_image_check_flash()` in
+        // user_init_normal() and branch here on `has_user_image && display_toggle`.
+        // ------------------------------------------------------------------
+        epd_display(get_time(), battery_mv, temperature, full);
     }
 
     if (time_reached_period(Timer_CH_0, 10))
