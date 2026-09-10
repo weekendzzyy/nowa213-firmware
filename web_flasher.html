@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nowa-213R-N 网页刷固件 (BLE OTA)</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 16px; max-width: 900px; }
+  button { padding: 8px 14px; margin: 4px 4px 4px 0; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #log { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; margin-top: 8px;
+         max-height: 260px; overflow: auto; background: #f4f4f4; padding: 8px; border: 1px solid #ddd; }
+  .hint { color: #555; font-size: 13px; }
+  .warn { color: #b00; font-size: 13px; font-weight: 600; }
+  #status { margin: 8px 0; font-weight: 600; }
+  progress { width: 100%; height: 14px; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h2>Nowa-213R-N 网页刷固件（BLE OTA）</h2>
+<p class="hint">用法：在本目录运行 <code>python -m http.server 8000</code>，浏览器打开
+<a href="http://localhost:8000/web_flasher.html">http://localhost:8000/web_flasher.html</a>。
+WebBLE 需要 localhost 或 https 安全环境，不能直接双击 file:// 打开。</p>
+
+<button id="connectBtn">连接</button>
+<span id="connState">未连接</span>
+<br>
+
+<p class="hint">选择要刷入的固件 <code>.bin</code>（必须是 Telink 固件，头部含 <code>TLNK</code> 标识）：</p>
+<input type="file" id="fileInput" accept=".bin">
+<br>
+<label class="hint"><input type="checkbox" id="verifyChk" checked>
+  回读校验（推荐；刷完逐字节读回比对，全部一致才提交重启。约多花 1 分钟）</label>
+<br>
+<button id="flashBtn" disabled>开始刷写</button>
+<button id="timeBtn" disabled>同步时间</button>
+<br>
+<div id="status">就绪</div>
+<progress id="prog" value="0" max="100"></progress>
+<div id="log"></div>
+
+<p class="warn">注意：刷写过程中不要断开连接、不要关页面。设备只在你按下「提交」这一步之后才会真正切换固件；
+上传中断的话直接重来即可，设备仍跑旧固件，不会变砖。</p>
+
+<script>
+// ---- GATT UUIDs (verified against firmware src/app_att.c) --------------------
+// OTA  : my_OtaServiceUUID = 0x221f / my_OtaUUID = 0x331f
+// RxTx : my_RxTx_ServiceUUID = 0x1f10 / my_RxTxUUID = 0x1f1f  (for time sync)
+const OTA_SERVICE  = '0000221f-0000-1000-8000-00805f9b34fb';
+const OTA_CHAR     = '0000331f-0000-1000-8000-00805f9b34fb';
+const RXTX_SERVICE = '00001f10-0000-1000-8000-00805f9b34fb';
+const RXTX_CHAR    = '00001f1f-0000-1000-8000-00805f9b34fb';
+
+// ---- firmware / OTA geometry (see Firmware/src/ota.c) ------------------------
+const BANK_START = 0x20000;   // OTA_BANK_START
+const BANK_SIZE  = 0x20000;   // OTA_MAX_SIZE (128 KB)
+const SECTOR     = 0x1000;    // flash erase granularity
+const BANK_WRITE = 0x100;     // device buffer is 256 bytes (ramd_to_flash_temp_buffer)
+const MAX_PAYLOAD = 240;      // max bytes per ATT write (MTU 247 -> 244 incl. opcode)
+
+const TZ_OFFSET_SECONDS = 8 * 3600;   // tag displays UTC+8 (firmware applies no offset)
+
+let device = null, server = null, otaChar = null, rxtxChar = null;
+let firmware = null;                  // Uint8Array of the selected .bin
+let pendingNotify = null;             // { resolve, timer } for the next OTA notification
+let busy = false;
+
+const $ = id => document.getElementById(id);
+function log(s){ const el = $('log'); el.textContent += s + '\n'; el.scrollTop = el.scrollHeight; }
+function setStatus(s){ $('status').textContent = s; }
+function setConn(s){ $('connState').textContent = s; }
+function setProg(p){ $('prog').value = Math.max(0, Math.min(100, p)); }
+function b4(v){ return [(v>>>24)&0xff, (v>>>16)&0xff, (v>>>8)&0xff, v&0xff]; }
+function hex(a){ return Array.from(a, b => ('0'+b.toString(16)).slice(-2)).join(' ').toUpperCase(); }
+
+// ---------------------------------------------------------------------------
+// Notification plumbing: the device replies to cmd 0x01 and 0x04/0x05 with a
+// BLE notification on the same characteristic. Register the resolver BEFORE the
+// write so the reply can never be missed.
+// ---------------------------------------------------------------------------
+function nextNotify(timeoutMs){
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingNotify && pendingNotify.timer === timer) pendingNotify = null;
+      reject(new Error('等待设备通知超时（' + (timeoutMs||2000) + 'ms）'));
+    }, timeoutMs || 2000);
+    pendingNotify = { resolve, timer };
+  });
+}
+
+async function write(bytes){
+  await otaChar.writeValue(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+}
+
+// ---------------------------------------------------------------------------
+// Connect
+// ---------------------------------------------------------------------------
+async function connect(){
+  try{
+    device = await navigator.bluetooth.requestDevice({
+      optionalServices: [OTA_SERVICE, RXTX_SERVICE],
+      acceptAllDevices: true
+    });
+    device.addEventListener('gattserverdisconnected', () => { setConn('已断开'); log('连接已断开'); });
+    server = await device.gatt.connect();
+    setConn('已连接: ' + (device.name || '???'));
+    await setupServices();
+  }catch(e){
+    setConn('连接失败');
+    log('连接错误: ' + e);
+  }
+}
+
+async function setupServices(){
+  otaChar = null; rxtxChar = null;
+
+  const svc = await server.getPrimaryService(OTA_SERVICE);
+  otaChar = await svc.getCharacteristic(OTA_CHAR);
+  await otaChar.startNotifications();
+  otaChar.addEventListener('characteristicvaluechanged', ev => {
+    const dv = ev.target.value;
+    const arr = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
+    if (pendingNotify){
+      clearTimeout(pendingNotify.timer);
+      const r = pendingNotify.resolve;
+      pendingNotify = null;
+      r(arr);
+    } else {
+      log('（忽略一条意外通知: ' + hex(arr) + '）');
+    }
+  });
+  log('OTA 特征已就绪（刷固件）');
+
+  try{
+    const s2 = await server.getPrimaryService(RXTX_SERVICE);
+    rxtxChar = await s2.getCharacteristic(RXTX_CHAR);
+    log('RxTx 特征已就绪（校时）');
+  }catch(e){
+    rxtxChar = null;
+    log('警告：未找到 RxTx 特征，校时按钮不可用。' + e);
+  }
+  $('flashBtn').disabled = false;
+  $('timeBtn').disabled = !rxtxChar;
+}
+
+// ---------------------------------------------------------------------------
+// File loading + validation
+// ---------------------------------------------------------------------------
+$('fileInput').addEventListener('change', function(){
+  const f = this.files[0];
+  if (!f){ firmware = null; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const bytes = new Uint8Array(reader.result);
+    // The tag only ever boots a Telink image; check the 'TLNK' magic at offset 8.
+    const magic = bytes.length > 11 ? Array.from(bytes.slice(8,12)).join(',') : '';
+    if (magic !== '75,78,76,84'){
+      log('拒绝：这不是 Telink 固件 .bin（offset 8 处没有 TLNK 标识）');
+      setStatus('文件无效');
+      firmware = null;
+      return;
+    }
+    if (bytes.length > BANK_SIZE){
+      log('拒绝：文件 ' + bytes.length + ' 字节超过 OTA bank 上限 ' + BANK_SIZE + ' 字节');
+      setStatus('文件过大');
+      firmware = null;
+      return;
+    }
+    firmware = bytes;
+    log('已载入固件: ' + bytes.length + ' 字节；首 16 字节 ' + hex(bytes.slice(0,16)));
+    setStatus('固件已载入，可以开始刷写');
+  };
+  reader.readAsArrayBuffer(f);
+});
+
+// ---------------------------------------------------------------------------
+// OTA primitives (mirror of atc1441 ATC_TLSR_Paper_OTA_writing.html)
+// ---------------------------------------------------------------------------
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// cmd 0x01: erase one 4 KB sector in the OTA bank. Device always replies with a
+// notification echoing the command -> consume it to keep the reply stream in sync.
+async function eraseFwArea(){
+  let n = 0;
+  const total = BANK_SIZE / SECTOR;
+  for (let addr = BANK_START; addr < BANK_START + BANK_SIZE; addr += SECTOR){
+    const p = nextNotify(4000);
+    await write([0x01, ...b4(addr)]);
+    await p;
+    n++;
+    setStatus('擦除 OTA 区 ' + n + '/' + total + ' (' + addr.toString(16) + ')');
+    setProg(n / total * 10);
+  }
+  log('OTA 区已擦除（' + total + ' 个扇区）');
+}
+
+// cmd 0x04: read 20 bytes of flash back. Device replies with a 20-byte notification.
+async function readFlash(addr){
+  const p = nextNotify(2500);
+  await write([0x04, ...b4(addr)]);
+  return await p;
+}
+
+// Upload the whole image in 256-byte banks; each bank is sent as <=240-byte
+// cmd 0x03 chunks followed by a cmd 0x02 "commit this bank" to `addr`.
+async function uploadImage(bytes){
+  const totalBanks = Math.ceil(bytes.length / BANK_WRITE);
+  let bank = 0;
+  for (let off = 0; off < bytes.length; off += BANK_WRITE){
+    let chunk = bytes.slice(off, off + BANK_WRITE);
+    // flash_write_page() works in 4-byte units; pad the tail with 0xFF (a no-op
+    // on already-erased flash) so the final short bank stays aligned.
+    if (chunk.length % 4 !== 0){
+      const pad = new Uint8Array(chunk.length + (4 - chunk.length % 4)).fill(0xFF);
+      pad.set(chunk);
+      chunk = pad;
+    }
+    for (let p = 0; p < chunk.length; p += MAX_PAYLOAD){
+      await write([0x03, ...chunk.slice(p, p + MAX_PAYLOAD)]);
+    }
+    await write([0x02, ...b4(BANK_START + off)]);
+    bank++;
+    if (bank % 8 === 0 || bank === totalBanks){
+      setStatus('上传 ' + Math.min(off + BANK_WRITE, bytes.length) + '/' + bytes.length +
+                ' 字节（第 ' + bank + '/' + totalBanks + ' 块）');
+      setProg(10 + bank / totalBanks * 55);
+    }
+  }
+  log('镜像已上传到 OTA bank（' + bytes.length + ' 字节）');
+}
+
+// Read the whole uploaded region back and compare byte-for-byte.
+async function verifyImage(bytes){
+  log('开始回读校验…');
+  let checked = 0;
+  for (let off = 0; off < bytes.length; off += 20){
+    const got = await readFlash(BANK_START + off);
+    const n = Math.min(20, bytes.length - off);
+    for (let i = 0; i < n; i++){
+      if (got[i] !== bytes[off + i]){
+        throw new Error('校验失败 @ 0x' + (BANK_START + off + i).toString(16) +
+                        '：设备=' + got[i] + '，主机=' + bytes[off + i]);
+      }
+    }
+    checked += n;
+    if ((off / 20) % 200 === 0){
+      setStatus('回读校验 ' + checked + '/' + bytes.length + ' 字节');
+      setProg(65 + checked / bytes.length * 30);
+    }
+  }
+  log('回读校验通过：' + bytes.length + ' 字节完全一致');
+}
+
+// The device-side gate in ota.c case 7 compares its RAM out_buffer[5..6] and
+// crc_out against each other — both are 0 after the last cmd 0x02 (which memsets
+// the buffer). cmd 0x05 @0 copies 20 zero bytes into out_buffer, so the gate
+// passes deterministically no matter what the device did earlier in the session.
+async function primeFinalGate(){
+  const p = nextNotify(2500);
+  await write([0x05, 0x00, 0x00, 0x00, 0x00]);
+  const v = await p;
+  if (!v.every(b => b === 0)){
+    log('提示：设备 out_buffer 不是全 0（' + hex(v) + '），仍发送 magic 提交');
+  }
+}
+
+// Same sum the official tool computes: over 0x20000 bytes, 0xFF-padded, & 0xffff.
+function calcCrc(bytes){
+  let sum = 0;
+  for (let i = 0; i < BANK_SIZE; i++) sum += (i < bytes.length ? bytes[i] : 0xFF);
+  return sum & 0xffff;
+}
+
+async function commitFirmware(){
+  const crc = calcCrc(firmware);
+  log('提交 magic：07 C0 01 CE ED ' + (((crc>>>8)&0xff).toString(16)) + ' ' + ((crc&0xff).toString(16)) +
+      '  （设备会忽略该 CRC，真正的保障是上面的回读校验）');
+  await write([0x07, 0xC0, 0x01, 0xCE, 0xED, (crc>>>8)&0xff, crc&0xff]);
+  log('提交命令已发送。设备正在擦写 0x00000–0x1FFFF 并重启，连接会断开，这是正常的。');
+}
+
+async function flashFirmware(){
+  if (!otaChar) return setStatus('请先连接设备');
+  if (!firmware) return setStatus('请先选择 .bin 固件');
+  if (busy) return;
+  busy = true;
+  $('flashBtn').disabled = true;
+  try{
+    log('=== 开始刷写：' + firmware.length + ' 字节 ===');
+    setProg(0);
+    await eraseFwArea();
+    await uploadImage(firmware);
+    if ($('verifyChk').checked){
+      await verifyImage(firmware);
+    } else {
+      log('已跳过回读校验（风险自负）');
+      setProg(95);
+    }
+    await primeFinalGate();
+    await commitFirmware();
+    setProg(100);
+    setStatus('完成：设备正在切换固件并重启');
+  }catch(e){
+    setStatus('中止：未提交，设备仍运行旧固件');
+    log('错误: ' + e);
+    log('设备未被改动（只有在最后一步「提交」之后才会切换固件）。可修正后重试。');
+  }finally{
+    busy = false;
+    $('flashBtn').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Time sync (RxTx 0xDD) — after an OTA the tag restarts with time 0, so it must
+// be set again once it has rebooted and re-advertised.
+// ---------------------------------------------------------------------------
+async function syncTime(){
+  if (!rxtxChar) throw new Error('未连接 RxTx 特征');
+  const t = Math.floor(Date.now()/1000) + TZ_OFFSET_SECONDS;
+  await rxtxChar.writeValue(new Uint8Array([0xDD,
+    (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]));
+  // t is already shifted into the tag's local time; render with getUTC* so the
+  // browser timezone is not applied a second time.
+  const d = new Date(t * 1000);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())} ` +
+         `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())} (UTC+8)`;
+}
+
+$('connectBtn').onclick = connect;
+$('flashBtn').onclick = flashFirmware;
+$('timeBtn').onclick = async () => {
+  try{ setStatus('校时中…'); const when = await syncTime(); setStatus('校时完成'); log('时间已设置为: ' + when); }
+  catch(e){ setStatus('校时失败'); log('校时错误: ' + e); }
+};
+</script>
+</body>
+</html>
