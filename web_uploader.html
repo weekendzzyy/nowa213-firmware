@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh" data-page-node-id="cy3WcBcPJFUSY8LuSmbjae">
+<head data-page-node-id="Qdz62WcxFWik2ZADcrUG9h">
+<meta charset="utf-8" data-page-node-id="Rjm5kFVIqcNlUNsDWbwG0m">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="o4DMedBSpJg2gubLAZGgrq">
 <title>Nowa-213R-N 上传器 + 校时</title>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 16px; }
@@ -12,37 +12,38 @@
   .hint { color:#555; font-size:13px; }
 </style>
 </head>
-<body>
-<h2>Nowa-213R-N 图片上传 + 时间同步</h2>
-<p class="hint">用法：在本目录运行 <code>python -m http.server 8000</code>，浏览器打开
-<a href="http://localhost:8000/web_uploader.html">http://localhost:8000/web_uploader.html</a>
+<body data-page-node-id="xhdHFsJSozluFS7bgpmRM2">
+<h2 data-page-node-id="6tvJVCqDov6U6vsI3PRqQq">Nowa-213R-N 图片上传 + 时间同步</h2>
+<p class="hint" data-page-node-id="l9pqtk6xvYmpfSssfz9zSz">用法：在本目录运行 <code data-page-node-id="WyOr6Ep36eImfx24jNjgtu">python -m http.server 8000</code>，浏览器打开
+<a href="http://localhost:8000/web_uploader.html" data-page-node-id="QmIwUS1vA5HTHb8BJPdhK6">http://localhost:8000/web_uploader.html</a>
 （WebBLE 需要 localhost/https 安全环境，不能直接双击 file:// 打开）。</p>
 
-<button id="connectBtn">连接</button>
-<button id="reconnectBtn">重连</button>
-<span id="connState">未连接</span>
-<br><br>
+<button id="connectBtn" data-page-node-id="XfnABRPOsSwbcFM4Cg9PKM">连接</button>
+<button id="reconnectBtn" data-page-node-id="mA9t3qEhjmaCq3jKeHAJ1E">重连</button>
+<span id="connState" data-page-node-id="EGy9Db7FAGzsybxnseCUps">未连接</span>
+<br data-page-node-id="2UEGyicS7bkzwFtami1BUf"><br data-page-node-id="dgoC7ONAGSVdQKT5iGnGXx">
 
-<input type="file" id="fileInput" accept="image/*">
-<button id="loadBtn">载入图片</button>
-<br>
-<canvas id="preview" width="250" height="122"></canvas>
-<p class="hint">预览 = 屏幕上最终显示的样子（已含固件列翻转）。下方黑色块 = 该区域为黑。</p>
+<input type="file" id="fileInput" accept="image/*" data-page-node-id="BUAPNJbhrLsaPJDHJQ73YL">
+<button id="loadBtn" data-page-node-id="XmOpav61TIRsDMBNZQ2vv4">载入图片</button>
+<br data-page-node-id="ivaCnAVmkolBzHF1k9boty">
+<canvas id="preview" width="250" height="122" data-page-node-id="FznyrhMPRJy3gXTKRI0f5W"></canvas>
+<p class="hint" data-page-node-id="wSdF3M0VqdpSixQIC5KfVa">预览 = 屏幕上最终显示的样子（已含固件列翻转）。下方黑色块 = 该区域为黑。</p>
 
-<br>
-<button id="uploadBtn">上传图片 (BLE)</button>
-<button id="timeBtn">同步时间</button>
-<button id="bothBtn">上传 + 同步时间</button>
-<br>
-<div id="status"></div>
-<div id="log"></div>
+<br data-page-node-id="rCOIVVXUIXmeoyQV4gv4eX">
+<button id="uploadBtn" data-page-node-id="9cgjRzWfOjQXaEc9nHeMNQ">上传图片 (BLE)</button>
+<button id="timeBtn" data-page-node-id="gn8zI8mKm9PD1pJAvlhbDY">同步时间</button>
+<button id="bothBtn" data-page-node-id="hUDqyKbCxCc7elW7ulFRHL">上传 + 同步时间</button>
+<br data-page-node-id="Kn5xul3lbgZXR9UbU7jWj6">
+<div id="status" data-page-node-id="9HbahaiAsUup42N91d7MQi"></div>
+<div id="log" data-page-node-id="6xRG3ljfGGLD5shAK5vXzf"></div>
 
 <script>
 // ---- BLE UUIDs (verified against firmware GATT table) ----
 const EPD_SERVICE = '13187b10-eba9-a3ba-044e-83d3217d9a38';
 const EPD_CHAR    = '4b646063-6264-f3a7-8941-e65356ea82fe';
-const RXTX_SERVICE = '1f10';   // short UUID -> 00001f10-...
-const RXTX_CHAR    = '1f1f';
+// Web Bluetooth requires full 128-bit UUIDs; 16-bit aliases like '1f10' are rejected.
+const RXTX_SERVICE = '00001f10-0000-1000-8000-00805f9b34fb';
+const RXTX_CHAR    = '00001f1f-0000-1000-8000-00805f9b34fb';
 
 // ---- panel geometry ----
 const W = 250, H_VISIBLE = 122, H_STORAGE = 128;
@@ -64,6 +65,23 @@ function hexToBytes(hex){
   return new Uint8Array(b);
 }
 
+// Resolve the two characteristics from an already-connected GATT server.
+async function setupServices(){
+  epdChar = null; rxtxChar = null;
+  const svc = await server.getPrimaryService(EPD_SERVICE);
+  epdChar = await svc.getCharacteristic(EPD_CHAR);
+  log('EPD_BLE 特征已就绪（传图）');
+
+  try{
+    const svc2 = await server.getPrimaryService(RXTX_SERVICE);
+    rxtxChar = await svc2.getCharacteristic(RXTX_CHAR);
+    log('RxTx 特征已就绪（校时 0xDD）');
+  }catch(e){
+    rxtxChar = null;
+    log('警告：未找到 RxTx 特征，校时按钮不可用。' + e);
+  }
+}
+
 async function connect(){
   try{
     device = await navigator.bluetooth.requestDevice({
@@ -73,22 +91,23 @@ async function connect(){
     device.addEventListener('gattserverdisconnected', () => setConn('已断开'));
     server = await device.gatt.connect();
     setConn('已连接: ' + (device.name || '???'));
-
-    const svc = await server.getPrimaryService(EPD_SERVICE);
-    epdChar = await svc.getCharacteristic(EPD_CHAR);
-    log('EPD_BLE 特征已就绪（传图）');
-
-    try{
-      const svc2 = await server.getPrimaryService(RXTX_SERVICE);
-      rxtxChar = await svc2.getCharacteristic(RXTX_CHAR);
-      log('RxTx 特征已就绪（校时 0xDD）');
-    }catch(e){
-      rxtxChar = null;
-      log('警告：未找到 RxTx 特征，校时按钮不可用。' + e);
-    }
+    await setupServices();
   }catch(e){
     setConn('连接失败');
     log('连接错误: ' + e);
+  }
+}
+
+// Reconnect to the SAME device (no new chooser dialog).
+async function reconnect(){
+  if (!device) return setConn('请先点"连接"选择设备');
+  try{
+    server = await device.gatt.connect();
+    setConn('已重连: ' + (device.name || '???'));
+    await setupServices();
+  }catch(e){
+    setConn('重连失败');
+    log('重连错误: ' + e);
   }
 }
 
@@ -172,7 +191,7 @@ async function syncTime(){
 }
 
 document.getElementById('connectBtn').onclick = connect;
-document.getElementById('reconnectBtn').onclick = () => { if (device) device.gatt.connect().then(connect); };
+document.getElementById('reconnectBtn').onclick = reconnect;
 
 document.getElementById('uploadBtn').onclick = async () => {
   if (!currentBuf) return setStatus('请先载入图片');

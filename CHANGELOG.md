@@ -125,3 +125,24 @@
 
 **说明**：`0xDD` 设时间后屏幕不会立即刷新（固件只在每分钟交替或下次传图时重绘时间页），
 最迟 1 分钟内显示新时间；想立刻看到可再点一次“上传图片”。
+
+### 修复 — WebBLE 连接报错 `Invalid Service name: '1f10'`（2026-09-10）
+
+**问题**：`requestDevice` 抛 `TypeError: Invalid Service name: '1f10'`。
+
+**根因**：Web Bluetooth 不接受 16 位短 UUID 别名（`'1f10'` / `'1f1f'`）。
+固件 GATT 表中 RxTx 服务/特征确实是 16 位 UUID（`my_RxTx_ServiceUUID = 0x1f10`、
+`my_RxTxUUID = 0x1f1f`），但浏览器要求写成完整 128 位形式。
+
+**修复**（`web_uploader.html`）：
+- `RXTX_SERVICE` → `00001f10-0000-1000-8000-00805f9b34fb`
+- `RXTX_CHAR`    → `00001f1f-0000-1000-8000-00805f9b34fb`
+- 顺手修掉“重连”按钮的真 bug：原实现 `device.gatt.connect().then(connect)` 会再次调用
+  `requestDevice` 弹出设备选择框；现拆分为 `setupServices()` + `reconnect()`，重连同一设备、不再弹窗。
+
+**顺带核实（无需改动）**：
+- ATT 写入不做长度校验：`my_EPD_BLE_Data` / `my_RxTx_Data` 均为单字节 `u8`，而传图每包写
+  240 字节一直正常，证明 Telink 栈按 `rf_packet_att_data_t.dat[]` 透传完整负载，
+  因此 5 字节的 `0xDD + 时间戳` 不会被截断；`cmd_parser.c` 正是从 `req->dat[1..4]` 组装时间。
+- 时区不会被二次叠加：固件 `app.c` 直接用 `get_time()` 做 `%24` / `%60` 取时分，不施加任何
+  偏移，故工具发送 `Date.now()/1000 + 8*3600`（东八区本地时间）是正确的。
