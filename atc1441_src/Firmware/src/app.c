@@ -21,6 +21,17 @@ RAM int16_t temperature;
 RAM uint8_t hour_refresh = 100;
 RAM uint8_t minute_refresh = 100;
 
+// ---- v5.0 power saving: night silence window ---------------------------------
+// Between NIGHT_START_HOUR (inclusive) and NIGHT_END_HOUR (exclusive) the panel
+// is not refreshed at all. The internal clock keeps running, so the first tick
+// after the window repaints the correct time - and because hour_refresh still
+// tracks the hour, that first repaint is a FULL refresh (clears ghosting).
+// Set both to 0 to disable night silence entirely.
+#define NIGHT_START_HOUR 0
+#define NIGHT_END_HOUR   6
+
+RAM uint8_t first_refresh_done = 0; // always paint once after power-up/reset
+
 // Settings
 extern settings_struct settings;
 
@@ -61,13 +72,27 @@ _attribute_ram_code_ void main_loop(void)
         ble_send_temp(EPD_read_temp() * 10);
     }
 
+    // v5.0: a BLE time sync (0xDD) repaints immediately instead of waiting for
+    // the next minute tick. Computed before the minute check so it also fires
+    // inside the night window.
+    uint8_t force_refresh = 0;
+    if (time_just_set)
+    {
+        time_just_set = 0;
+        force_refresh = 1;
+    }
+
     uint8_t current_minute = (get_time() / 60) % 60;
-    if (current_minute != minute_refresh)
+    if (force_refresh || current_minute != minute_refresh)
     {
         minute_refresh = current_minute;
         uint8_t current_hour = ((get_time() / 60) / 60) % 24;
         uint8_t full = (current_hour != hour_refresh) ? 1 : 0;
         hour_refresh = current_hour;
+
+        // v5.0 night silence: skip the repaint, but keep the bookkeeping above
+        // up to date so the morning tick is a full refresh.
+        uint8_t night = (current_hour >= NIGHT_START_HOUR) && (current_hour < NIGHT_END_HOUR);
 
         // ------------------------------------------------------------------
         // Clock-only mode (v4.0).
@@ -78,8 +103,14 @@ _attribute_ram_code_ void main_loop(void)
         // to the clock.
         // To restore alternation later: re-add `user_image_check_flash()` in
         // user_init_normal() and branch here on `has_user_image && display_toggle`.
+        // v5.0: the panel is driven only when it is actually visible/useful -
+        // never before the first paint of this power cycle, and not at night.
         // ------------------------------------------------------------------
-        epd_display(get_time(), battery_mv, temperature, full);
+        if (force_refresh || !first_refresh_done || !night)
+        {
+            epd_display(get_time(), battery_mv, temperature, full);
+            first_refresh_done = 1;
+        }
     }
 
     if (time_reached_period(Timer_CH_0, 10))

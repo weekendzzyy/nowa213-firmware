@@ -6,7 +6,12 @@ extern "C" {
 
 #define CLOCK_SYS_CLOCK_HZ  	24000000
 
-#define ADVERTISING_INTERVAL 1600
+// v5.0 power saving: BLE advertising interval.
+// Unit is 0.625 ms -> 1600 = 1 s (original), 16000 = 10 s.
+// Advertising is a constant background drain, so a longer interval saves energy.
+// Trade-off: a central (phone/browser) may need up to one interval to discover
+// the tag. BLE spec caps adv interval at 10.24 s (16384), so 16000 is legal.
+#define ADVERTISING_INTERVAL 16000
 
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 

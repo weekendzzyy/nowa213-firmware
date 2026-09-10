@@ -19,3 +19,7 @@ void handler_time(void);
 uint8_t time_reached_period(timer_channel ch, uint32_t seconds);
 void set_time(uint32_t time_now);
 uint32_t get_time(void);
+
+// v5.0: 1 = a new time was just pushed over BLE; main_loop clears it after the
+// forced repaint. Lets a time sync show up immediately (also during night pause).
+extern uint8_t time_just_set;

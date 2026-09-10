@@ -9,6 +9,7 @@
 RAM uint16_t time_trime = 5000;// The higher the number the slower the time runs!, -32,768 to 32,767 
 RAM uint32_t one_second_trimmed = CLOCK_16M_SYS_TIMER_CLK_1S;
 RAM uint32_t current_unix_time;
+RAM uint8_t time_just_set = 0; // set by set_time(), cleared by main_loop after repaint
 RAM uint32_t last_clock_increase;
 RAM uint32_t last_reached_period[10] = {0};
 RAM uint8_t has_ever_reached[10] = {0};
@@ -46,6 +47,10 @@ _attribute_ram_code_ uint8_t time_reached_period(timer_channel ch, uint32_t seco
 _attribute_ram_code_ void set_time(uint32_t time_now)
 {
     current_unix_time = time_now;
+    // v5.0: tell main_loop a fresh time arrived (BLE 0xDD) so the panel can be
+    // repainted immediately instead of waiting for the next minute tick - which
+    // matters at night, when the periodic repaint is intentionally paused.
+    time_just_set = 1;
 }
 
 _attribute_ram_code_ uint32_t get_time(void)

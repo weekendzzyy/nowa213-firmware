@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh" data-page-node-id="8fibqpjHvVEjSldFGGuZUR">
+<head data-page-node-id="uChkF0Foje3A7RER3d3QF8">
+<meta charset="utf-8" data-page-node-id="OPOGJVNLIMYyu6cDADC7VA">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="Bi1yM5TCfXqPrE5Xuunzwl">
 <title>Nowa-213R-N 网页刷固件 (BLE OTA)</title>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 16px; max-width: 900px; }
@@ -17,30 +17,30 @@
   code { background: #eee; padding: 1px 4px; border-radius: 3px; }
 </style>
 </head>
-<body>
-<h2>Nowa-213R-N 网页刷固件（BLE OTA）</h2>
-<p class="hint">用法：在本目录运行 <code>python -m http.server 8000</code>，浏览器打开
-<a href="http://localhost:8000/web_flasher.html">http://localhost:8000/web_flasher.html</a>。
+<body data-page-node-id="azhmkUCEIgVAyrwXw8VtLg">
+<h2 data-page-node-id="Rdc1BWyUFI8SZFs3Xu5dDB">Nowa-213R-N 网页刷固件（BLE OTA）</h2>
+<p class="hint" data-page-node-id="8ECU7zx7mSwvWfNsYJVgMl">用法：在本目录运行 <code data-page-node-id="GUOTEVOyfiXffwo6GsgeJE">python -m http.server 8000</code>，浏览器打开
+<a href="http://localhost:8000/web_flasher.html" data-page-node-id="jF55nvcfoHCOQKUP55e14n">http://localhost:8000/web_flasher.html</a>。
 WebBLE 需要 localhost 或 https 安全环境，不能直接双击 file:// 打开。</p>
 
-<button id="connectBtn">连接</button>
-<span id="connState">未连接</span>
-<br>
+<button id="connectBtn" data-page-node-id="gv9Jbi2nBFOQgr85m7Sg4H">连接</button>
+<span id="connState" data-page-node-id="dnqAjFrbFC1yEEl5HrBA0b">未连接</span>
+<br data-page-node-id="XdWkZxowZG5G9dsKz1TIxF">
 
-<p class="hint">选择要刷入的固件 <code>.bin</code>（必须是 Telink 固件，头部含 <code>TLNK</code> 标识）：</p>
-<input type="file" id="fileInput" accept=".bin">
-<br>
-<label class="hint"><input type="checkbox" id="verifyChk" checked>
+<p class="hint" data-page-node-id="DHby8ohfXaAp2skdF55WnE">选择要刷入的固件 <code data-page-node-id="wOfpnUAgZIMEB5gtM27BV8">.bin</code>（必须是 Telink 固件，头部含 <code data-page-node-id="Xlv0BsGlgXDLaQMnRiCURK">TLNK</code> 标识）：</p>
+<input type="file" id="fileInput" accept=".bin" data-page-node-id="0tzcDUANXER5TBO88pSwBZ">
+<br data-page-node-id="scPOeI7FMUzDhn42lvZFhN">
+<label class="hint" data-page-node-id="KJ7lrJjCjWL4mwzxLrxXSH"><input type="checkbox" id="verifyChk" checked data-page-node-id="P8WLjDsn7XG3fd0HIJHLZi">
   回读校验（推荐；刷完逐字节读回比对，全部一致才提交重启。约多花 1 分钟）</label>
-<br>
-<button id="flashBtn" disabled>开始刷写</button>
-<button id="timeBtn" disabled>同步时间</button>
-<br>
-<div id="status">就绪</div>
-<progress id="prog" value="0" max="100"></progress>
-<div id="log"></div>
+<br data-page-node-id="mf3cmwqgwodUIr9raUezzb">
+<button id="flashBtn" disabled data-page-node-id="LuAU0t89cZdnlMno3PqzMQ">开始刷写</button>
+<button id="timeBtn" disabled data-page-node-id="r2TsPPRNoLRBAaoje2zOAd">同步时间</button>
+<br data-page-node-id="soKtPRh9OSIJEQzGtD80V4">
+<div id="status" data-page-node-id="2DIKuC0cDNwFG9popo57PQ">就绪</div>
+<progress id="prog" value="0" max="100" data-page-node-id="YIRCvysR559Ovc6JzKGc54"></progress>
+<div id="log" data-page-node-id="hj1gsMJQrqFoGDxlbHzB0A"></div>
 
-<p class="warn">注意：刷写过程中不要断开连接、不要关页面。设备只在你按下「提交」这一步之后才会真正切换固件；
+<p class="warn" data-page-node-id="ZxsM8Mpjr7EZ1zNI4twClj">注意：刷写过程中不要断开连接、不要关页面。设备只在你按下「提交」这一步之后才会真正切换固件；
 上传中断的话直接重来即可，设备仍跑旧固件，不会变砖。</p>
 
 <script>
