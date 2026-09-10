@@ -32,6 +32,17 @@ RAM uint8_t minute_refresh = 100;
 
 RAM uint8_t first_refresh_done = 0; // always paint once after power-up/reset
 
+// ---- v6.0 partial-window bookkeeping ----------------------------------------
+// v6.0 turns the per-minute repaint into a REAL partial refresh limited to the
+// clock-digit rectangle (see the IL0373 notes in epd_bw_213.c).  Everything drawn
+// OUTSIDE that rectangle - the "ESL_..." header, the BLE indicator, the
+// temperature and the battery line - would therefore go stale, so a change in
+// any of them must force a full (whole-panel) refresh instead.
+// 0xFF/0x7FFF/0xFFFF mean "nothing shown yet" and trigger the first full paint.
+RAM uint8_t  last_ble_shown  = 0xFF;   // last displayed BLE-connected state
+RAM int16_t  last_temp_shown = 0x7FFF; // last displayed panel temperature (degC)
+RAM uint16_t last_batt_shown = 0xFFFF; // last displayed battery voltage (mV)
+
 // Settings
 extern settings_struct settings;
 
@@ -87,7 +98,45 @@ _attribute_ram_code_ void main_loop(void)
     {
         minute_refresh = current_minute;
         uint8_t current_hour = ((get_time() / 60) / 60) % 24;
-        uint8_t full = (current_hour != hour_refresh) ? 1 : 0;
+
+        // ------------------------------------------------------------------
+        // v6.0: decide between a real PARTIAL refresh (clock digits only, cheap)
+        // and a FULL panel refresh.  A full refresh is required when:
+        //   * the hour changed  -> the hourly ghost-clearing full refresh, or
+        //   * something drawn outside the partial window changed (see the
+        //     last_*_shown variables above); otherwise those lines would stay
+        //     stale until the top of the next hour.
+        // The battery comparison uses a 32 mV hysteresis, because the 1 mV
+        // jitter of the ADC would otherwise defeat the window nearly every tick.
+        // ------------------------------------------------------------------
+        uint8_t force_full = 0;
+
+        uint8_t ble_now = ble_get_connected();
+        if (ble_now != last_ble_shown)
+        {
+            last_ble_shown = ble_now;
+            force_full = 1;
+        }
+
+        int16_t temp_now = EPD_read_temp();
+        if (temp_now != last_temp_shown)
+        {
+            last_temp_shown = temp_now;
+            force_full = 1;
+        }
+
+        if (last_batt_shown == 0xFFFF)
+        {
+            last_batt_shown = battery_mv; // first paint: adopt, no forced refresh
+        }
+        else if ((battery_mv > last_batt_shown ? battery_mv - last_batt_shown
+                                               : last_batt_shown - battery_mv) >= 32)
+        {
+            last_batt_shown = battery_mv;
+            force_full = 1;
+        }
+
+        uint8_t full = (current_hour != hour_refresh || force_full) ? 1 : 0;
         hour_refresh = current_hour;
 
         // v5.0 night silence: skip the repaint, but keep the bookkeeping above
