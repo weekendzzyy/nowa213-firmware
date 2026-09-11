@@ -38,22 +38,36 @@
 nowa213/
 ├── README.md                 # 项目总览
 ├── DEVELOPMENT.md            # 本文件
-├── CHANGELOG.md              # 版本历史
+├── CHANGELOG.md              # 版本历史（含每版 SHA256）
 ├── .gitignore
-├── atc1441_src/Firmware/    # 固件源码（已 vendor，含 tc32 工具链*、build_firmware.py）
-│   ├── src/                 # ★主要改动的代码在这里（app.c / epd.c / epd_ble_service.c / epd.h）
-│   ├── components/          # atc1441 上游组件（SDK lib、驱动、tinyFlash…）
-│   ├── static_src/          # 启动文件 cstartup_825x.S
-│   ├── make/                # tl_firmware_tools.py（加 CRC）
-│   └── build_firmware.py    # 无 make 也能编译的脚本（复刻 makefile）
-├── TlsrComSwireWriter/      # pvvx 刷机工具 + 各版本 .bin
-├── firmware_releases/       # ★发布固件（带版本号/日期/SHA256 文件名）
-├── gen_epd_image.py         # 生成 EPD 测试图（250×128 纯黑等）
-├── bmp2epd_framebuffer.py   # BMP → SSD1675 帧缓冲转换
-├── list_ports.py            # 枚举 COM 口
-└── test_black_250x128.*     # 纯黑测试图 / 帧缓冲 / 像素代码
+├── atc1441_src/Firmware/     # 固件源码（已 vendor，含 tc32 工具链*、build_firmware.py）
+│   ├── src/                  # ★主要改动的代码在这里
+│   ├── components/           # atc1441 上游组件（SDK lib、驱动、tinyFlash…）
+│   ├── static_src/           # 启动文件 cstartup_825x.S
+│   ├── make/                 # tl_firmware_tools.py（加 CRC）
+│   └── build_firmware.py     # 无 make 也能编译的脚本（复刻 makefile）
+├── TlsrComSwireWriter/       # pvvx 刷机工具 + 各版本救砖 .bin
+├── firmware_releases/        # ★发布固件（文件名带版本/日期/大小）
+├── docs/                     # 研究笔记与接线速查
+│   ├── nowa213_flash_research.md
+│   ├── nowa213_wiring_flash_summary.md
+│   └── images/               # 文档配图（唯一入库的渲染图）
+├── tools/                    # 全部脚本：图片工具 + 离线校验 + 屏幕预览
+│   ├── epd_image_tool.py     # BMP → 帧缓冲 → 可选直写 Flash
+│   ├── gen_epd_image.py      # 生成 EPD 测试图（250×122 纯黑等）
+│   ├── bmp2epd_framebuffer.py# BMP → 帧缓冲 + BLE 指令序列
+│   ├── gen_test_image.py     # 非对称测试图（验方向 / 裁切）
+│   ├── list_ports.py         # 枚举 COM 口
+│   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
+│   └── verify_*.py           # 7 个几何 / 协议断言脚本
+├── web_flasher.html          # 浏览器 WebBLE 刷机
+└── web_uploader.html         # 浏览器 WebBLE 传图 + 对时
 ```
 （*tc32 工具链被 gitignore，不入库）
+
+> **不入库的生成物**：`previews/`（屏幕渲染图）、`test_black_*`（测试图与帧缓冲）、
+> `epd_preview/`、`atc1441_src/Firmware/out/`、`ATC_Paper.bin` —— 全部由 `tools/` 下的
+> 脚本重新生成，规则见 `.gitignore`。`firmware_releases/*.bin` 例外：那是**交付物**，入库。
 
 ---
 
@@ -65,7 +79,7 @@ nowa213/
 ```powershell
 cd atc1441_src/Firmware
 python build_firmware.py
-# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，约 90972 字节）
+# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v12.0 实测 91276 字节）
 ```
 
 ### ⚠️ 编译后必须做 SRAM 自检
@@ -76,7 +90,7 @@ TLSR8359 只有 **64KB SRAM**，栈顶固定在 `0x850000`。`boot.link` **无�
 ```powershell
 cd atc1441_src/Firmware
 ./tc32_windows/bin/tc32-elf-nm.exe out/ATC_Paper.elf | grep _end_bss_
-# 必须 < 0x850000（v2.0 实测 0x84efc1，余量 ~4KB）
+# 必须 < 0x850000（v12.0 实测 0x84efb1，余量 ~4.1KB）
 ```
 
 **加任何全局/静态大数组前，先算 SRAM 占用。** 用户图当初用 5KB RAM 缓冲即踩此坑，
@@ -111,7 +125,9 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 
 ---
 
-## 4. 代码地图：时间↔图片切换功能（v2.0）
+## 4. 代码地图
+
+### 4.1 时间↔图片切换（v2.0）
 
 功能：默认显示走时界面；经 BLE 传图后，每分钟在「时间」与「用户图」间交替；图存 Flash，断电不丢。
 
@@ -130,7 +146,50 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 ```
 （固件 <0x16300、OTA 0x20000–0x40000、settings 0x78000，互不冲突）
 
-**像素极性**：缓冲 `0x00`=黑、`0xFF`=白（SSD1675 列主序，1 字节=8 竖像素）。
+**像素极性**：缓冲 `0x00`=黑、`0xFF`=白（SSD1680 列主序，1 字节=8 竖像素）。
+
+### 4.2 v3.0 以来的改动入口（速查）
+
+| 想改什么 | 去哪 | 关键约束 |
+|---|---|---|
+| 屏幕排版 / 加字段 | `epd.c` → `epd_display()` | **先跑 `tools/render_screen_preview.py`** 离线看效果，别为几个像素来回刷机；底部 6 行不可见 |
+| 刷新策略（何时全刷） | `app.c` → `main_loop()` | 只有「分钟变→局部刷」「小时变→全刷」「`force_full`→全刷」三条路，**没有 N 分钟周期** |
+| 局部刷新窗口（省电） | `epd_bwr_213.c` 的 `0x01` / `0x0F` 写入处 | ★本机跑的是这个文件，不是 `epd_bw_213.c` |
+| 时钟走时 | `time.c` → `handler_time()` | 必须用 `while` 追补，**主循环频率不可假设** |
+| 电量换算 | `battery.c` → `get_battery_level()` | 测的是芯片 VDD，不是电池节点；窗口 2200→3100 mV |
+| BLE 指令 | `epd_ble_service.c` | opcode `0x00 <fill>` = memset 缓冲，`0x01` = 推送到屏 |
+| 版本号 | `app_config.h` → `FW_VERSION_STRING` | 改了要同步 `epd.c` 的 `EPD_VERSION_X`（右对齐，`verify_version_badge.py` 会抓） |
+| 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v12.0 临时诊断，问题定位后把宏置 0 摘除 |
+
+> ⚠️ **改任何驱动代码前，先确认哪个文件在跑。** 屏幕左上角自报 `ESL_xxxxxx BWR213`
+> ⇒ `epd_model == 2` ⇒ 执行 `epd_bwr_213.c`（SSD1680 族）。`epd_bw_213.c`
+> （IL0373/UC8151 族）只是 detect 全失败时的**兜底分支，本机永不执行**。
+> v6.0 曾把局部刷新写进 `epd_bw_213.c`，整版白做 —— 「文件里有这段代码」≠「这段代码会跑」。
+
+### 4.3 BLE 协议（两个特征值）
+
+**A. EPD 写特征值**（`epd_ble_service.c` → `epd_ble_handle_write()`）
+
+| 指令 | 长度 | 作用 |
+|---|---|---|
+| `00 <fill>` | 2 | `memset(epd_buffer, fill)`，一次填满 4000 字节。`00`=全黑、`FF`=全白 |
+| `01` | 1 | 水平翻转 → `EPD_Display()` 推屏 → 存 Flash（供「时间↔图片」交替用）|
+| `02 <hi> <lo>` | 3 | 设置顺序写指针 `byte_pos`（大端）|
+| `03 <data…>` | ≥2 | 从 `byte_pos` 起顺序写入缓冲 |
+| `04` | 1 | 把已写入的 `byte_pos` 字节当 TIFF 解码显示 |
+
+> 传完整图片：`02 0000` → 多条 `03 …` → `01`。
+> 只想要全黑可偷懒：`00 00` → `01`，**不必发 4000 字节**。
+
+**B. 命令特征值**（`cmd_parser.c`）
+
+| 指令 | 作用 |
+|---|---|
+| `DD <4B 大端 unix 时间>` | 对时（`web_uploader.html` 用）；收到后立即重绘一次 |
+| `E0 <model>` | 强制指定 `epd_model`（自动检测出错时才用）|
+| `FE <n>` | 广播间隔 = n × 10 秒（省电主开关，见 §4.2 的时基坑）|
+| `FA <n>` / `FC <n>` | 温度偏移 / 温度报警点 |
+| `DE` / `DF` | 恢复默认设置并存 Flash / 保存当前设置 |
 
 ---
 
@@ -193,9 +252,13 @@ git tag -a v2.1 -m "..."
 | `Chip sleep?` | 已跑固件深睡 retention 挡住 `-t 200` 复位 | 改 `-t 3000` |
 | 屏幕完全没反应/时间停 | `.bss` 越过 64KB SRAM 栈顶，上电即崩 | 减 RAM 占用（图改存 Flash）|
 | 屏幕冻结、BLE 死 | 只拔 3V3，TX 倒灌电，芯片没真复位 | **整根拔 USB**，等 3 秒再插 |
-| 传图下方有白边 | 图高 122 但缓冲逻辑高 128，底 6 行未覆盖 | 用 250×128 图（`gen_epd_image.py`）|
+| 传图下方有白边 | 图高 122 但缓冲逻辑高 128，底 6 行未覆盖 | 用 250×122 可见区（`tools/gen_epd_image.py`）|
 | 图片一会儿消失 | `main_loop` 每分钟自动重绘时间界面 | 已是 v2.0「交替」设计；要纯图就禁自动刷新 |
 | 读回零星 `0xFF` | 读回瞬断（非真写入） | 重刷一次再读回即 MATCH |
+| **改了驱动但行为没变** | 改到了兜底驱动 `epd_bw_213.c`，本机不执行 | 先读屏幕型号串确认 `epd_model`，改 `epd_bwr_213.c`（v6.0 踩过）|
+| **时钟走时偏慢** | `handler_time()` 用 `if`，每次调用最多 +1 秒，速率被主循环频率钳制 | 改 `while` 追补（v9.0）；主循环每圈都会睡，别假设调用频率 |
+| **每隔几分钟整屏闪、间隔还不固定** | 拿传感器读数做 `!=` 比较去触发全刷；温度 1℃ 量化，室温落在两步之间时会来回跳 | 加死区（v11.0）。仍然无效 ⇒ 把各触发源计数器画到屏上定位（v12.0），别在纸面上继续推演 |
+| **反汇编搜不到某全局变量的地址** | TC32 用「基址寄存器 + 小偏移」寻址，只有基址进字面量池 | `nm` 取地址 → 找基址字面量 → 按差值反推偏移；直接 grep 全地址会**假阴性** |
 
 ---
 

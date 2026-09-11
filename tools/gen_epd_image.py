@@ -8,7 +8,7 @@ MSB = top pixel. 0x00 = black, 0xFF = white.
 
 Output formats:
   - 24-bit BMP (250x128, bottom-up, no padding)
-  - raw SSD1675 column-major frame buffer (.bin, 4000 bytes for 250x128)
+  - raw SSD1680 column-major frame buffer (.bin, 4000 bytes for 250x128)
   - hex text (.txt)
   - C array (.h)
   - minimal BLE command text (.txt)  [opcode 0x00 fill + 0x01 display]
@@ -64,7 +64,7 @@ def write_bmp(path: str, pixels):
 
 
 def to_framebuffer(pixels):
-    """Convert 250x128 row-major pixel array to SSD1675 column-major buffer."""
+    """Convert 250x128 row-major pixel array to SSD1680 column-major buffer."""
     fb = bytearray(FB_SIZE)
     for x in range(WIDTH):
         for byte_y in range(BYTES_PER_COL):

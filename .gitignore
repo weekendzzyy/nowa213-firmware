@@ -33,3 +33,32 @@ TlsrComSwireWriter/nowa213_original_backup.bin
 # ---- EPD image tool generated previews / demo files ----
 epd_preview/
 *_demo.png
+
+# ---- Rendered screen previews ----
+# Regenerate: python tools/render_screen_preview.py --zoom 3
+# The one image that is referenced by README.md is tracked separately as
+# docs/images/screen-v12.0.png so the docs never depend on a build artefact.
+previews/
+
+# ---- Generated test image sets ----
+# Regenerate: python tools/gen_epd_image.py  /  python tools/bmp2epd_framebuffer.py
+# The BLE opcode sequence they emit (00 <fill> = memset, 01 = refresh) is
+# documented in DEVELOPMENT.md instead of being committed as a file per size.
+test_black_*.bmp
+test_black_*.bin
+test_black_*.h
+test_black_*.txt
+test_image.png
+
+# ---- Failed FCC download ----
+# This file is a Cloudflare "403 / enable JavaScript" page, not the datasheet.
+# Kept on disk for reference; delete it if you re-download the real document.
+fcc_internal.pdf
+
+# ---- Upstream stray duplicate ----
+# "Kopie" is German for "copy"; liblt_8258.a is the canonical library.
+*Kopie*
+
+# ---- Python virtualenvs ----
+.venv/
+venv/

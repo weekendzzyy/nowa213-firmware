@@ -4,6 +4,17 @@
 `atc1441_alternate_flashimg_vX.Y_YYYY-MM-DD_<大小>B.bin`
 每条发布记录 SHA256，用于烧录后读回校验比对。
 
+### 仓库结构变更（2026-09-11，不含固件改动）
+
+- 根目录 5 个脚本移入 `tools/`：`bmp2epd_framebuffer.py`、`epd_image_tool.py`、
+  `gen_epd_image.py`、`gen_test_image.py`、`list_ports.py`。
+  **下方历史记录里出现的裸文件名，现在都在 `tools/` 下。**
+- 根目录两份文档移入 `docs/`：`nowa213_flash_research.md`、`nowa213_wiring_flash_summary.md`。
+- 生成物不再入库：`previews/`、`test_black_*`、`epd_preview/` —— 由 `tools/` 下的脚本
+  重新生成，规则见 `.gitignore`。本文件记录的 `firmware_releases/*.bin` 是**交付物**，仍然入库。
+- 补上 `LICENSE`（MIT，继承 atc1441 与 pvvx 上游）。
+- 修正全仓库的屏驱型号笔误 **SSD1675 → SSD1680**（研究笔记保留原文并加勘误块）。
+
 ---
 
 ## v2.0 — 2026-09-04

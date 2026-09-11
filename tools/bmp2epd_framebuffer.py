@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# BMP(250x122,24bpp) -> SSD1675 BWR-213 framebuffer (black/white plane)
+# BMP(250x122,24bpp) -> SSD1680 BWR-213 framebuffer (black/white plane)
 # Layout: column-major, 1 byte = 8 vertical pixels, MSB = top.
 #   width=250 -> 250 columns; padded height=128 -> 128/8 = 16 bytes/column
 #   buffer size = 250 * 16 = 4000 bytes (the "image plane" firmware loads to 0x24 RAM)
@@ -71,7 +71,7 @@ def main():
         chunk = buf[i:i+16]
         lines.append(" ".join(f"{b:02X}" for b in chunk))
     with open("test_black_250x122_pixelcode.txt", "w") as f:
-        f.write(f"// SSD1675 BWR-213 framebuffer (black/white plane)\n")
+        f.write(f"// SSD1680 BWR-213 framebuffer (black/white plane)\n")
         f.write(f"// {W}x{H} image, padded to {W}x{PAD_H}, column-major, 1B=8 vertical px, MSB=top\n")
         f.write(f"// polarity: 0x00=BLACK, 0xFF=WHITE (per firmware epd.c)\n")
         f.write(f"// size = {SIZE} bytes; red plane forced 0x00 by firmware\n")
@@ -81,7 +81,7 @@ def main():
 
     # C array
     with open("test_black_250x122_pixelcode.h", "w") as f:
-        f.write(f"// SSD1675 BWR-213 framebuffer, pure-BLACK 250x122 image\n")
+        f.write(f"// SSD1680 BWR-213 framebuffer, pure-BLACK 250x122 image\n")
         f.write(f"// {SIZE} bytes, column-major, 0x00=black. Red plane = 0x00 (firmware).\n")
         f.write(f"#define EPD_FB_SIZE {SIZE}\n")
         f.write("const uint8_t epd_black_framebuffer[EPD_FB_SIZE] = {\n")
