@@ -43,6 +43,10 @@ WebBLE 需要 localhost 或 https 安全环境，不能直接双击 file:// 打�
 <p class="warn" data-page-node-id="ZxsM8Mpjr7EZ1zNI4twClj">注意：刷写过程中不要断开连接、不要关页面。设备只在你按下「提交」这一步之后才会真正切换固件；
 上传中断的话直接重来即可，设备仍跑旧固件，不会变砖。</p>
 
+<p class="hint" data-page-node-id="ReconnHint01">刷完固件后点「连接」报 <code data-page-node-id="ReconnHint02">NetworkError: Connection attempt failed.</code>
+多半不是固件坏了，而是这两件事之一：设备重启后<strong>每 10 秒才广播一次</strong>（省电设置），刚连时错过了广播；
+或者浏览器还攥着上次刷写留下的旧连接句柄。等 10~15 秒再连、或按 F5 刷新本页即可。</p>
+
 <script>
 // ---- GATT UUIDs (verified against firmware src/app_att.c) --------------------
 // OTA  : my_OtaServiceUUID = 0x221f / my_OtaUUID = 0x331f
@@ -96,19 +100,54 @@ async function write(bytes){
 // ---------------------------------------------------------------------------
 // Connect
 // ---------------------------------------------------------------------------
+// The tag advertises every 10 s (ADVERTISING_INTERVAL = 16000, the v5.0 power
+// saving), so a single connect attempt can miss the advertisement entirely and
+// Chrome reports "NetworkError: Connection attempt failed". Retry with backoff.
+async function connectWithRetry(attempts){
+  attempts = attempts || 5;
+  for (let i = 1; i <= attempts; i++){
+    try{
+      return await device.gatt.connect();
+    }catch(e){
+      log('连接尝试 ' + i + '/' + attempts + ' 失败: ' + e);
+      if (i === attempts) throw e;
+      setConn('重试连接 ' + (i + 1) + '/' + attempts + '…');
+      await delay(1200 * i);
+    }
+  }
+}
+
 async function connect(){
   try{
+    // Drop any link left over from a previous session FIRST. After an OTA the tag
+    // reboots, but the page - and Windows' BLE stack - can still hold the old
+    // link-layer handle; connecting on top of a stale handle fails immediately
+    // with "NetworkError: Connection attempt failed".
+    if (device && device.gatt && device.gatt.connected){
+      try{ device.gatt.disconnect(); }catch(_){}
+      await delay(400);
+    }
+
     device = await navigator.bluetooth.requestDevice({
       optionalServices: [OTA_SERVICE, RXTX_SERVICE],
       acceptAllDevices: true
     });
-    device.addEventListener('gattserverdisconnected', () => { setConn('已断开'); log('连接已断开'); });
-    server = await device.gatt.connect();
+    device.addEventListener('gattserverdisconnected', () => {
+      setConn('已断开');
+      log('连接已断开（刚提交完固件时属正常：设备正在重启）');
+      otaChar = null; rxtxChar = null;
+      $('timeBtn').disabled = true;
+    });
+    setConn('连接中…');
+    server = await connectWithRetry(5);
     setConn('已连接: ' + (device.name || '???'));
     await setupServices();
   }catch(e){
     setConn('连接失败');
     log('连接错误: ' + e);
+    log('排查顺序：①设备刚重启只每 10 秒广播一次（v5.0 省电），等 10~15 秒再点「连接」；' +
+        '②按 F5 刷新本页，清掉旧的 GATT 句柄；' +
+        '③确认价签屏幕是否在走字（不走字说明固件没起来，见 README 救砖）。');
   }
 }
 

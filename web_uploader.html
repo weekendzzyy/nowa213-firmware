@@ -82,19 +82,46 @@ async function setupServices(){
   }
 }
 
+// The tag advertises only every 10 s (ADVERTISING_INTERVAL = 16000, a power
+// saving), so one connect attempt can miss the advertisement and Chrome reports
+// "NetworkError: Connection attempt failed". Retry with backoff instead.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function connectWithRetry(dev, attempts){
+  attempts = attempts || 5;
+  for (let i = 1; i <= attempts; i++){
+    try{
+      return await dev.gatt.connect();
+    }catch(e){
+      log('连接尝试 ' + i + '/' + attempts + ' 失败: ' + e);
+      if (i === attempts) throw e;
+      setConn('重试连接 ' + (i + 1) + '/' + attempts + '…');
+      await sleep(1200 * i);
+    }
+  }
+}
+
 async function connect(){
   try{
+    // Release a stale link left over from an earlier session first: the old
+    // handle makes gatt.connect() fail instantly.
+    if (device && device.gatt && device.gatt.connected){
+      try{ device.gatt.disconnect(); }catch(_){}
+      await sleep(400);
+    }
     device = await navigator.bluetooth.requestDevice({
       optionalServices: [EPD_SERVICE, RXTX_SERVICE],
       acceptAllDevices: true
     });
     device.addEventListener('gattserverdisconnected', () => setConn('已断开'));
-    server = await device.gatt.connect();
+    setConn('连接中…');
+    server = await connectWithRetry(device, 5);
     setConn('已连接: ' + (device.name || '???'));
     await setupServices();
   }catch(e){
     setConn('连接失败');
     log('连接错误: ' + e);
+    log('排查顺序：①刷完固件后设备每 10 秒才广播一次，等 10~15 秒再连；' +
+        '②按 F5 刷新本页清掉旧的 GATT 句柄；③看价签屏幕是否在走字。');
   }
 }
 
@@ -102,7 +129,7 @@ async function connect(){
 async function reconnect(){
   if (!device) return setConn('请先点"连接"选择设备');
   try{
-    server = await device.gatt.connect();
+    server = await connectWithRetry(device, 5);
     setConn('已重连: ' + (device.name || '???'));
     await setupServices();
   }catch(e){
