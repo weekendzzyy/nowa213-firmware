@@ -108,7 +108,7 @@ def read_define(path, name, default=None):
     return m.group(1).strip() if m else default
 
 
-def render(with_badge=True):
+def render(with_badge=True, with_ble=True):
     g16 = load_font('font16.h', 'Dialog_plain_16')
     g30 = load_font('font30.h', 'Special_Elite_Regular_30')
     g60 = load_font('font_60.h', 'DSEG14_Classic_Mini_Regular_40')
@@ -116,17 +116,24 @@ def render(with_badge=True):
     ver = read_define('app_config.h', 'FW_VERSION_STRING', 'v0.0')
     vx = int(read_define('epd.c', 'EPD_VERSION_X', '199'))
     vy = int(read_define('epd.c', 'EPD_VERSION_Y', '120'))
+    # BLE indicator: epd.c:368 passes these literals straight to
+    # obdWriteStringCustom() as (232, 20); they are not named constants there, so
+    # fall back to the literals.  Promote them to #defines in epd.c and this will
+    # pick the new values up automatically.
+    bx = int(read_define('epd.c', 'EPD_BLE_IND_X', '232'))
+    by = int(read_define('epd.c', 'EPD_BLE_IND_Y', '20'))
 
     px = bytearray(VDISP_W * VDISP_H)
 
     draw_string(px, *g16, 1, 17, 'ESL_140EC6 BWR213')      # 1 model line
-    draw_string(px, *g16, 232, 20, 'B')                    # 2 BLE indicator
+    if with_ble:
+        draw_string(px, *g16, bx, by, 'B')                 # 2 BLE indicator
     draw_string(px, *g60, 50, 65, '14:23')                 # 3 clock
     draw_string(px, *g30, 10, 95, "25'C")                  # 4 temperature
     draw_string(px, *g16, 10, 120, 'Battery 3600mV')       # 5 battery
     if with_badge:
         draw_string(px, *g16, vx, vy, ver)                 # 6 version badge
-    return px, (vx, vy, ver)
+    return px, (vx, vy, ver), (bx, by)
 
 
 def to_image(px, zoom, glass_only=False):
@@ -143,10 +150,13 @@ def to_image(px, zoom, glass_only=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--no-badge', action='store_true', help='render without the version badge')
+    ap.add_argument('--no-ble', action='store_true',
+                    help='render the disconnected state (no "B" indicator)')
     ap.add_argument('--zoom', type=int, default=3)
     args = ap.parse_args()
 
-    px, (vx, vy, ver) = render(with_badge=not args.no_badge)
+    px, (vx, vy, ver), (bx, by) = render(with_badge=not args.no_badge,
+                                         with_ble=not args.no_ble)
     os.makedirs(OUTDIR, exist_ok=True)
 
     tag = 'v9' if args.no_badge else 'v10'
@@ -177,7 +187,33 @@ def main():
         print('wrote %s  (%dx%d, red box = badge ink area)'
               % (zoom_png, box.width, box.height))
 
+    # top-right close-up, so the BLE indicator (and the tail of the model line)
+    # can be told apart at a glance
+    z = 8
+    x0, y0 = 200, 0
+    x1, y1 = VDISP_W, 34
+    box = Image.new('RGB', (x1 - x0, y1 - y0), PAPER)
+    bd = ImageDraw.Draw(box)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if px[y * VDISP_W + x]:
+                bd.point((x - x0, y - y0), fill=INK)
+    box = box.resize(((x1 - x0) * z, (y1 - y0) * z), Image.NEAREST)
+    if not args.no_ble:
+        bd2 = ImageDraw.Draw(box)
+        # same approximation verify_version_badge.py uses: 12 px advance, cap
+        # height 12 sitting on the baseline
+        bd2.rectangle([(bx - x0) * z - 4, (by - 12 - y0) * z - 4,
+                       (bx + 12 - x0) * z + 4, (by + 2 - y0) * z + 4],
+                      outline=(200, 30, 40), width=3)
+    ble_png = os.path.join(OUTDIR, 'ble_ind_zoom%d.png' % z)
+    box.save(ble_png)
+    print('wrote %s  (%dx%d, red box = the "B" BLE indicator)'
+          % (ble_png, box.width, box.height))
+
     print('badge at x=%d y=%d  text="%s"' % (vx, vy, ver))
+    print('ble indicator at x=%d y=%d  text="%s"'
+          % (bx, by, '' if args.no_ble else 'B'))
     return 0
 
 
