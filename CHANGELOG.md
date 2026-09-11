@@ -489,3 +489,110 @@ RP/SR=0 → 重复 1 次），因此局部刷新的波形长度**恰好等于 WS
 **发布文件**：`firmware_releases/atc1441_clockonly_v8.0_2026-09-11_90988B.bin`
 **SHA256**：`4840335ec4eefce8b5fe25357dbc089d4718238fc395c7dbba74935b733e6c86`
 **大小**：90988 字节
+
+---
+
+## v9.0 — 2026-09-11（时钟走得慢：每调用只加 1 秒）
+
+### 现象
+
+价签上的"一分钟"对应现实 2 分钟甚至更久，无法精确统计。
+
+### 根因：`handler_time()` 用 `if` 而不是 `while`，把时钟速率卡在了"主循环调用频率"上
+
+`app.c` 的 `main_loop()` 第一句就是 `blt_sdk_main_loop()`，而 BLE 协议栈就在这里面**睡到下一个事件**；
+真正的睡眠入口是 `blt_brx_sleep()` → `cpu_sleep_wakeup()`：
+
+- 反汇编链接后的镜像：`blt_sdk_main_loop` 位于 `0x39b0`，紧邻的 `blt_brx_sleep` 位于 `0x3f28..0x4386`，
+  而 `blt_brx_sleep` **函数体内的字面量池**（`0x4270`）里就是 `&cpu_sleep_wakeup`（`0x0084efb4`）。
+  → 外层循环每转一圈就睡一次，`handler_time()` 因此**远低于每秒一次**。
+- v5.0 把 `ADVERTISING_INTERVAL` 从 1600（1 s）改成 16000（10 s），唤醒频率再降 10 倍，
+  于是每次调用之间的间隔达到数秒量级。
+
+而旧代码是：
+
+```c
+if (clock_time() - last_clock_increase >= one_second_trimmed)
+{
+    last_clock_increase += one_second_trimmed;
+    current_unix_time++;          // 每次调用最多 +1 秒
+}
+```
+
+它隐式假设"主循环每秒被调用很多次"。这个假设不成立之后，时钟速率就被钳制在
+**（每秒调用次数 × 1 秒）**上，而不是由真实时间驱动 → 走得慢，且慢多少取决于睡眠节奏。
+这也解释了为什么这个问题在 v5.0 之后才暴露出来。
+
+### 为什么 `clock_time()` 可以直接用来追补
+
+`clock_time()` 读的是 16 MHz 系统定时器（`timer.h`：「system Timer : 16Mhz, Constant」，
+寄存器 `reg_system_tick` = `0x00800740`，与 CPU 主频设置无关），而且**协议栈会在每次唤醒时把它补回来**：
+
+- `main.c` 调用 `blc_pm_select_internal_32k_crystal()`，其中 `pm_tim_recover = pm_tim_recover_32k_rc`；
+- 反汇编该函数（库 `liblt_8258.a`，`pm_32k_rc.o`）得到：
+
+```
+sys_tick = tick_cur + ((now_32k - last_32k) * tick_32k_calib) >> 4
+```
+
+即用 32k RTC（休眠期间仍在跑）线性外推系统定时器。所以跨休眠的 `clock_time()` 是连续的，
+可以直接当作真实时间使用。注意 `PM_LONG_SLEEP_WAKEUP_EN` 为 0、`pm_get_32k_tick` 在内部 32k RC
+模式下并未被赋值，所以不应改用它——真正的实时基准就是被补回来的系统定时器。
+
+### 改动
+
+`atc1441_src/Firmware/src/time.c`：`if` → `while`（一行关键字 + 注释）。仅此一处。
+
+```c
+while (clock_time() - last_clock_increase >= one_second_trimmed)
+{
+    last_clock_increase += one_second_trimmed;
+    current_unix_time++;
+}
+```
+
+每轮循环只有几条指令；即使一口气积压一小时（3600 轮）也只是微秒级。
+
+### 验证
+
+- 新增 `tools/verify_time_catchup.py`：对同一套唤醒时序分别模拟新旧函数体，全部断言 PASS。
+  按 10 s 广播间隔、每次唤醒跑 6 轮主循环建模：
+  **旧代码计数速率 0.594（1.7 倍慢），新代码 0.999**；
+  且新代码在 adv ∈ {0.05, 1, 10, 60, 200} s、burst ∈ {1, 2, 3, 4, 6, 200} 的组合下
+  滞后量**恒定为约 +2 秒**（1 秒"已完成整秒"的固有滞后 + `time_trime` 312 ppm），不随唤醒节奏增长。
+- **反汇编并排对比**（`objdump -d out/time.o`）：
+  - v8.0：读完一次 `clock_time()` 后直接 `tjex lr` 返回 —— 只可能 +1 秒；
+  - v9.0：`0x30` 重新读 `clock_time()`，`0x38` 处 `tjcs.n 28` 回跳成环。
+- **段大小对比**（用 `git worktree` 从 tag `v8.0` 独立重建基线）：
+  `.ram_code` 0x4b70 → 0x4b80（+16 B，就是那个循环）；
+  `.text` / `.data` / `.bss` **大小完全不变**；`.retention_data` 仅整体上移 0x10
+  （所以镜像里其余差异都是指向 `RAM` 变量的字面量地址 +0x10）。
+  `_end_bss_ = 0x84efc1` —— 与 v3.0~v8.0 完全一致，无 SRAM 风险。
+- 附带：从 tag `v8.0` 重建的 bin 与归档的 v8.0 固件**逐字节一致** → 构建可复现。
+
+### 连带影响（都是修正，不是回归）
+
+- `time_reached_period(Timer_CH_1, 30)`（电量/温度采样）此前实际每 ~5 分钟才触发一次，
+  现在按设计每 30 秒触发一次；
+- `time_reached_period(Timer_CH_0, 10)`（LED 指示）此前每 ~100 秒，现在每 10 秒一次
+  （单次点亮 1 ms，功耗可忽略）。
+
+### 已知边界
+
+`clock_time()` 是 32 位、16 MHz，**268.4 秒回绕一次**。单次睡眠超过 268 秒时无符号差值会算错，
+追补失效。当前 `ADVERTISING_INTERVAL = 16000`（10 秒），实际不可能睡这么久；
+但**如果以后关掉广播或把广播间隔调到分钟级，这个修复就会失效**。
+（`tools/verify_time_catchup.py` 里用 `adv=300` 显式复现并断言了这个边界。）
+
+### 上机判定
+
+- ✅ **成功**：价签时间与手机/电脑时间同步走，几分钟内看不出偏差。建议放置 10~30 分钟后再看。
+- ❌ **仍然偏慢（例如走 1 分钟用 1.5 分钟）**：说明系统定时器并未被真正补回，
+  那就要改用 32k tick 作为时基，需要另做诊断固件（通过 RxTx 通道上报
+  `current_unix_time` / `clock_time()` / `cpu_get_32k_tick()` 三个计数器来定标）。
+- ⚠️ **轻微偏慢（每天 ~27 秒）**：这是 `time_trime = 5000`（+312 ppm）造成的，属另一个问题。
+  先确认粗差已消除，再把 `time_trime` 调到 0 实测一天；这一步按"单步微调"的原则单独做。
+
+**发布文件**：`firmware_releases/atc1441_clockonly_v9.0_2026-09-11_90988B.bin`
+**SHA256**：`9428b77dcf6effa693ee5d0e37633131bd93dc4de68ebf14be13f1bf57d0edfd`
+**大小**：90988 字节
