@@ -332,3 +332,93 @@
 - ✅ **成功**：秒针不显示，但**分钟数字每分钟正常跳变**，屏幕其余内容不变。
 - ❌ **窗口算错**：屏幕看起来一切正常，但**分钟数字不再变化（时间冻住）**。
   → 把 `epd_bw_213.c` 的 `EPD_USE_PARTIAL_WINDOW` 改为 `0` 重新编译即可回退到 v5.0 行为。
+
+---
+
+## v7.0 — 2026-09-11（真·局部窗口刷新，搬到了正确的驱动上）
+
+### 前提纠正：v5.0 / v6.0 的省电改动落在了不会执行的文件里
+
+价签屏幕左上角由 `epd.c:355` 打印 `epd_model_string[epd_model]`，实机显示
+**`ESL_xxxxxx BWR213`** → `epd_model == 2`。而 `epd.c:193-204` 的分发是
+model 1 → `EPD_BW_213_Display()`（`epd_bw_213.c`）、model 2 → `EPD_BWR_213_Display()`
+（`epd_bwr_213.c`），且 `set_EPD_model()` 只在 `cmd_parser.c:66` 被 BLE 命令调用、启动时不设。
+
+结论：**本机实际跑的是 `epd_bwr_213.c`**；`epd_bw_213.c`（UC8151/IL0373 族）只是
+detect 全失败时的兜底分支（`epd.c:134`）。因此：
+
+- v5.0 的 LUT 帧数 10→7（写在 `epd_bw_213.c`）**从未执行**；
+- v6.0 的 IL0373 `0x90 PTL` 局部窗口 + `0x92 PTOUT`（写在 `epd_bw_213.c`）**从未执行**，
+  v6.0 实际是 no-op。
+
+v7.0 把真·局部窗口做进 `epd_bwr_213.c`。v6.0 的代码保留不动（对 BW213 面板仍是对的），
+v5.0 的 LUT 改动仍待移植。
+
+### 手册依据：SSD1680 没有 PTL，但有「只驱动部分栅极」的两把钥匙
+
+SSD1680 手册 Rev 0.14（`SSD1680_DIE01129S.pdf`）：
+
+| 寄存器 | 位置 | 语义 |
+|---|---|---|
+| `0x01` Driver Output Control | p.34 | `MUX[8:0]` = 驱动线数 − 1；范围 16~296 MUX。byte1=MUX[7:0]、byte2=MUX[8]、byte3=GD,SM,TB |
+| `0x0F` Gate Scan Start Position | p.36 | `SCN[8:0]` = 起始栅极，取值 0~295 |
+
+p.36 Figure 8-2 把语义演示得很清楚：MUX ratio = 093h、Gate Start Position = 04Ah 时，
+**G0~G73 不被驱动（表中记 `-`）**，G74 起才驱动，且 G74 = ROW74、G75 = ROW75（恒等映射，
+正是本驱动 GD=0 / SM=0 所选的映射）。
+
+所以 `MUX[8:0] = N−1` 配 `SCN = F` 就精确驱动连续区间 `G_F..G_(F+N−1)`，
+区间外的栅极不被驱动 → **保留上一次全刷的墨迹**。这正是我们要的：只重写时钟数字，
+其余画面原地不动。刷新耗时正比于扫描栅极数，这就是省电来源。
+
+### 几何推导（不是猜的）
+
+```
+FixBuffer() : epd_buffer[col*16 + byteY] = ~ucMirror[ obd[byteY][249-col] ]
+RAM 写入    : 下标 i = col*16 + byteY  ->  RAM X = byteY, RAM Y = 296 - col
+              (0x11 = 0x01：X 递增、Y 递减；0x4F = 0x0128)
+因此        : glass_x = 249 - col = RAM_Y - 47   ->   RAM_Y = glass_x + 47
+```
+
+时钟墨迹在全部 1440 个时刻覆盖 glass x [54,190]（由 `font_60.h` 真实字形度量穷举得到）
+→ RAM 行（栅极号）**[101,237]**，共 137 条。
+
+### 改动（`atc1441_src/Firmware/src/epd_bwr_213.c`）
+
+新增 `EPD_USE_GATE_WINDOW` 开关 + 窗口常量 + `#error` 静态断言，并在
+`EPD_BWR_213_Display()` 的 `0x01` 写入处按 `full_or_partial` 分支：
+
+- 局部刷新：`0x01` 写 `MUX[8:0]=136`（137 线）、byte3 仍为 `0x01`；随后 `0x0F` 写 `SCN=101`
+- 全刷：保持原样 `0x28 0x01 0x01`（296 线）
+
+**数据通路刻意完全不动**：仍然把完整的 250×16 字节整帧写到同样的 RAM 地址，
+`0x44/0x45/0x4E/0x4F` 一个都没碰。只有「驱动哪些栅极」变了，所以窗口算错也不会撕裂画面，
+最坏只是数字不更新；把 `EPD_USE_GATE_WINDOW` 改成 `0` 即回到旧行为。
+
+### 验证
+
+- `_end_bss_ = 0x84efc1`，与 v3.0~v6.0 完全一致（余量 4159 B）→ 无 SRAM 风险
+- `tools/verify_gate_window.py` 全部断言 PASS，输出：
+  - 时钟墨迹 glass x [54,190] → RAM 行 [101,237]
+  - `0x01` 应发 `88 00 01`、`0x0F` 应发 `65 00`
+- 反汇编核对（`tc32-elf-objdump -d out/epd_bwr_213.o`），局部路径实际发出：
+  `WriteCmd(0x01) → WriteData(0x88) → WriteData(0x00) → WriteData(0x01) →
+   WriteCmd(0x0F) → WriteData(0x65) → WriteData(0x00)` —— 与脚本预言**逐字节一致**
+- 全刷路径仍为 `28 01 01`（反汇编 0x92~0x9e 处确认）
+
+### 预期收益（手册模型，未做电流实测）
+
+扫描栅极 **137/296 = 46%**，即刷新耗时与驱动功耗约为原来的一半。数据量不变
+（仍整帧写 RAM），所以省的是面板驱动部分，不是 SPI。
+
+### 上机后如何判定成功/失败
+
+- ✅ **成功**：分钟数字照常每分钟跳变，且屏幕其余部分（标题、温度、电量行）保持正常。
+- ❌ **失败 A（数字冻住）**：说明被驱动的栅极区间没覆盖到数字 → 把窗口放宽（例如
+  `EPD_WIN_GATE_FIRST 90` / `EPD_WIN_GATE_LAST 250`）重编译再试。
+- ❌ **失败 B（数字错位/花屏）**：说明 `0x0F` 起始栅极或 MUX 语义理解有偏差 →
+  把 `epd_bwr_213.c` 的 `EPD_USE_GATE_WINDOW` 改为 `0` 重新编译，即回到 v6.0 行为。
+
+**发布文件**：`firmware_releases/atc1441_clockonly_v7.0_2026-09-11_90988B.bin`
+**SHA256**：`c5fce54b513dc01e6f17caaf7675802afbf7a75bafe91adc3ce6d634da2a769a`
+**大小**：90988 字节
