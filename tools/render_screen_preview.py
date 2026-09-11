@@ -15,7 +15,7 @@
 #
 # Elements drawn, in the order epd_display() draws them:
 #   1  "ESL_xxxxxx MODEL"      Dialog_plain_16             (   1,  17)
-#   2  BLE_conn_string[...]    Dialog_plain_16             ( 232,  20)
+#   2  BLE rune (v11.0)        BLE_ICON_BITS[13] in epd.c  ( 233,   8)
 #   3  "HH:MM"                 DSEG14_Classic_Mini_...40   (  50,  65)
 #   4  "NN'C"                  Special_Elite_Regular_30    (  10,  95)
 #   5  "Battery NNNNmV"        Dialog_plain_16             (  10, 120)
@@ -102,6 +102,33 @@ def draw_string(px, data, glyphs, x, y, text):
     return pen
 
 
+def load_ble_icon():
+    """v11.0: parse the Bluetooth rune straight out of epd.c, so the preview can
+    never drift from what the firmware actually draws.  Returns (x, y, w, h, rows)."""
+    text = open(os.path.join(SRC, 'epd.c'), encoding='utf-8', errors='ignore').read()
+
+    def num(name, default):
+        m = re.search(r'#define\s+%s\s+(\d+)' % name, text)
+        return int(m.group(1)) if m else default
+
+    m = re.search(r'BLE_ICON_BITS\s*\[[^\]]*\]\s*=\s*\{(.*?)\};', text, re.S)
+    if not m:
+        sys.exit('no BLE_ICON_BITS[] table in epd.c')
+    rows = [int(v, 0) for v in re.findall(r'0x[0-9a-fA-F]+', m.group(1))]
+    return (num('BLE_ICON_X', 233), num('BLE_ICON_Y', 8),
+            num('BLE_ICON_W', 7), num('BLE_ICON_H', 13), rows)
+
+
+def draw_ble_icon(px, x, y, w, h, rows):
+    """Mirror of epd_draw_ble_icon(): bit n of a row -> pixel (x + n, y + row)."""
+    for r in range(h):
+        for c in range(w):
+            if rows[r] & (1 << c):
+                cx, cy = x + c, y + r
+                if 0 <= cx < VDISP_W and 0 <= cy < VDISP_H:
+                    px[cy * VDISP_W + cx] = 1
+
+
 def read_define(path, name, default=None):
     text = open(os.path.join(SRC, path), encoding='utf-8', errors='ignore').read()
     m = re.search(r'#define\s+%s\s+"?([^"\n]+)"?' % name, text)
@@ -116,24 +143,26 @@ def render(with_badge=True, with_ble=True):
     ver = read_define('app_config.h', 'FW_VERSION_STRING', 'v0.0')
     vx = int(read_define('epd.c', 'EPD_VERSION_X', '199'))
     vy = int(read_define('epd.c', 'EPD_VERSION_Y', '120'))
-    # BLE indicator: epd.c:368 passes these literals straight to
-    # obdWriteStringCustom() as (232, 20); they are not named constants there, so
-    # fall back to the literals.  Promote them to #defines in epd.c and this will
-    # pick the new values up automatically.
-    bx = int(read_define('epd.c', 'EPD_BLE_IND_X', '232'))
-    by = int(read_define('epd.c', 'EPD_BLE_IND_Y', '20'))
+    # v11.0 BLE indicator: the bare letter "B" was replaced by a drawn rune.
+    # Both its geometry and its bitmap are parsed out of epd.c, so editing the
+    # icon there is reflected here with no second place to keep in sync.
+    bx, by, bw, bh, brows = load_ble_icon()
+    use_icon = read_define('epd.c', 'EPD_USE_BLE_ICON', '1') == '1'
 
     px = bytearray(VDISP_W * VDISP_H)
 
     draw_string(px, *g16, 1, 17, 'ESL_140EC6 BWR213')      # 1 model line
     if with_ble:
-        draw_string(px, *g16, bx, by, 'B')                 # 2 BLE indicator
+        if use_icon:
+            draw_ble_icon(px, bx, by, bw, bh, brows)       # 2a BLE rune (v11.0)
+        else:
+            draw_string(px, *g16, 232, 20, 'B')            # 2b legacy letter
     draw_string(px, *g60, 50, 65, '14:23')                 # 3 clock
     draw_string(px, *g30, 10, 95, "25'C")                  # 4 temperature
     draw_string(px, *g16, 10, 120, 'Battery 3600mV')       # 5 battery
     if with_badge:
         draw_string(px, *g16, vx, vy, ver)                 # 6 version badge
-    return px, (vx, vy, ver), (bx, by)
+    return px, (vx, vy, ver), (bx, by, bw, bh, use_icon)
 
 
 def to_image(px, zoom, glass_only=False):
@@ -155,11 +184,11 @@ def main():
     ap.add_argument('--zoom', type=int, default=3)
     args = ap.parse_args()
 
-    px, (vx, vy, ver), (bx, by) = render(with_badge=not args.no_badge,
-                                         with_ble=not args.no_ble)
+    px, (vx, vy, ver), (bx, by, bw, bh, use_icon) = render(
+        with_badge=not args.no_badge, with_ble=not args.no_ble)
     os.makedirs(OUTDIR, exist_ok=True)
 
-    tag = 'v9' if args.no_badge else 'v10'
+    tag = 'v10' if args.no_badge else 'v11'
     main_png = os.path.join(OUTDIR, 'screen_%s_zoom%d.png' % (tag, args.zoom))
     to_image(px, args.zoom).save(main_png)
     print('wrote %s  (%dx%d)' % (main_png, VDISP_W * args.zoom, GLASS_H * args.zoom))
@@ -201,19 +230,28 @@ def main():
     box = box.resize(((x1 - x0) * z, (y1 - y0) * z), Image.NEAREST)
     if not args.no_ble:
         bd2 = ImageDraw.Draw(box)
-        # same approximation verify_version_badge.py uses: 12 px advance, cap
-        # height 12 sitting on the baseline
-        bd2.rectangle([(bx - x0) * z - 4, (by - 12 - y0) * z - 4,
-                       (bx + 12 - x0) * z + 4, (by + 2 - y0) * z + 4],
+        # v11.0 draws a real bitmap, so the box is exact.  The legacy letter is
+        # still boxed with the old approximation (12 px advance, cap height 12).
+        if use_icon:
+            bx0, by0, bw0, bh0 = bx, by, bw, bh
+        else:
+            bx0, by0, bw0, bh0 = bx, by - 12, 12, 14
+        bd2.rectangle([(bx0 - x0) * z - 4, (by0 - y0) * z - 4,
+                       (bx0 + bw0 - x0) * z + 4, (by0 + bh0 - y0) * z + 4],
                       outline=(200, 30, 40), width=3)
     ble_png = os.path.join(OUTDIR, 'ble_ind_zoom%d.png' % z)
     box.save(ble_png)
-    print('wrote %s  (%dx%d, red box = the "B" BLE indicator)'
+    print('wrote %s  (%dx%d, red box = the BLE indicator)'
           % (ble_png, box.width, box.height))
 
     print('badge at x=%d y=%d  text="%s"' % (vx, vy, ver))
-    print('ble indicator at x=%d y=%d  text="%s"'
-          % (bx, by, '' if args.no_ble else 'B'))
+    if args.no_ble:
+        print('ble indicator: not drawn (disconnected state)')
+    elif use_icon:
+        print('ble rune at x=%d y=%d  %dx%d bitmap'
+              % (bx, by, bw, bh))
+    else:
+        print('ble indicator at x=%d y=%d  legacy letter "B"' % (bx, by))
     return 0
 
 

@@ -43,6 +43,30 @@ RAM uint8_t  last_ble_shown  = 0xFF;   // last displayed BLE-connected state
 RAM int16_t  last_temp_shown = 0x7FFF; // last displayed panel temperature (degC)
 RAM uint16_t last_batt_shown = 0xFFFF; // last displayed battery voltage (mV)
 
+// ---- v11.0: dead bands for the two analog sources ---------------------------
+// Up to v10.0 the panel temperature was compared with `!=`.  That is a trap.
+// The SSD1680 internal sensor is quantised to 1 degC, and the reading is taken
+// *during* the refresh - epd.c calls EPD_BWR_213_Display(), which issues 0x1B
+// and reads the register after 0x20 Master Activation, i.e. while the boosters
+// are heating the die.  Storing that value in epd_temperature and handing it
+// back through EPD_read_temp()'s cache means every comparison pits "die
+// temperature at the end of refresh N-1" against "die temperature at the end of
+// refresh N".  Whenever the ambient temperature sits near a quantisation
+// boundary, those two readings land on opposite sides of it and toggle by 1
+// degree.  Each toggle forced a FULL panel refresh, so the tag flickered
+// through the whole black/white/black sequence every few minutes - and the
+// interval looked random because it depends purely on where the ambient
+// temperature happens to fall between two steps, not on any timer.
+//
+// A dead band removes it: the panel is only re-driven when the reading really
+// moves.  The cost is that the displayed temperature can lag by up to
+// (threshold - 1) degC until the next hourly full refresh - invisible for a
+// value that moves a couple of degrees per day.
+#define TEMP_FULL_HYSTERESIS_C   3
+// Same reasoning for the battery: get_battery_mv() is sampled every 30 s in
+// main_loop and 32 mV of hysteresis did not absorb the ADC noise.
+#define BATT_FULL_HYSTERESIS_MV  100
+
 // Settings
 extern settings_struct settings;
 
@@ -106,8 +130,11 @@ _attribute_ram_code_ void main_loop(void)
         //   * something drawn outside the partial window changed (see the
         //     last_*_shown variables above); otherwise those lines would stay
         //     stale until the top of the next hour.
-        // The battery comparison uses a 32 mV hysteresis, because the 1 mV
-        // jitter of the ADC would otherwise defeat the window nearly every tick.
+        // v11.0: the temperature and battery comparisons use dead bands, see
+        // TEMP_FULL_HYSTERESIS_C / BATT_FULL_HYSTERESIS_MV above.  Without them
+        // the 1 degC quantisation of the panel sensor and the ADC noise
+        // defeated the window again almost every tick, and the tag did a full
+        // black/white/black refresh every few minutes instead of hourly.
         // ------------------------------------------------------------------
         uint8_t force_full = 0;
 
@@ -118,8 +145,11 @@ _attribute_ram_code_ void main_loop(void)
             force_full = 1;
         }
 
+        // v11.0: dead band instead of `!=` - see TEMP_FULL_HYSTERESIS_C above.
+        // The first comparison still fires (last_temp_shown starts at 0x7FFF).
         int16_t temp_now = EPD_read_temp();
-        if (temp_now != last_temp_shown)
+        if ((temp_now > last_temp_shown ? temp_now - last_temp_shown
+                                        : last_temp_shown - temp_now) >= TEMP_FULL_HYSTERESIS_C)
         {
             last_temp_shown = temp_now;
             force_full = 1;
@@ -130,7 +160,7 @@ _attribute_ram_code_ void main_loop(void)
             last_batt_shown = battery_mv; // first paint: adopt, no forced refresh
         }
         else if ((battery_mv > last_batt_shown ? battery_mv - last_batt_shown
-                                               : last_batt_shown - battery_mv) >= 32)
+                                               : last_batt_shown - battery_mv) >= BATT_FULL_HYSTERESIS_MV)
         {
             last_batt_shown = battery_mv;
             force_full = 1;

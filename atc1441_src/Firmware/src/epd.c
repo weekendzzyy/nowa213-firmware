@@ -32,6 +32,47 @@ extern const uint8_t ucMirror[];
 #define EPD_VERSION_X 199
 #define EPD_VERSION_Y 120
 
+// ---- v11.0: Bluetooth icon instead of the letter "B" -----------------------
+// Set EPD_USE_BLE_ICON to 0 to go back to the plain "B" from BLE_conn_string[].
+#define EPD_USE_BLE_ICON 1
+
+// 7 x 13 px, the classic Bluetooth rune: a vertical stem at x = 3 with two
+// right-pointing chevrons that meet it at the top, the middle and the bottom.
+// Bit n of a row selects the pixel at (x + n).
+//
+//    ...#...      # stem, top
+//    ...##..      diagonal  (3,0)->(6,3)
+//    ...#.#.
+//    ...#..#
+//    ...#.#.      diagonal  (6,3)->(3,6)
+//    ...##..
+//    ...#...      # stem, middle
+//    ...##..      diagonal  (3,6)->(6,9)
+//    ...#.#.
+//    ...#..#
+//    ...#.#.      diagonal  (6,9)->(3,12)
+//    ...##..
+//    ...#...      # stem, bottom
+//
+// Placement is derived from the glyph it replaces, not guessed:
+//   "B" in Dialog_plain_16 at (232, 20) has glyph {w=10, h=12, xo=1, yo=-12},
+//   so its ink covers x 233..242 (centre 237.5) and y 8..19 (centre 13.5).
+// The rune is 7 x 13: x = 234 puts its centre at 237, i.e. within half a pixel
+// of the letter's, and y = 8 seats its bottom row on the baseline the letter
+// used.  tools/verify_ble_icon.py re-derives all of this from font16.h.
+#define BLE_ICON_W 7
+#define BLE_ICON_H 13
+#define BLE_ICON_X 234
+#define BLE_ICON_Y 8
+
+static const uint8_t BLE_ICON_BITS[BLE_ICON_H] = {
+    0x08, 0x18, 0x28, 0x48, 0x28, 0x18, 0x08,
+    0x18, 0x28, 0x48, 0x28, 0x18, 0x08
+};
+
+// The drawing routine itself lives further down, just above epd_display(), so
+// that it sits below the global OBDISP obd that it writes into.
+
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
 RAM uint8_t epd_update_state = 0;
@@ -315,6 +356,22 @@ _attribute_ram_code_ void epd_display_tiff(uint8_t *pData, int iSize)
     EPD_Display(epd_buffer, epd_buffer_size, 1);
 }
 
+// Draw the BLE rune at (x, y).  It goes through obdSetPixel() exactly like the
+// fonts do, so it lands in the same epd_temp buffer that FixBuffer() later
+// converts - no separate pixel format to keep in sync.
+static void epd_draw_ble_icon(int x, int y)
+{
+    int row, col;
+    for (row = 0; row < BLE_ICON_H; row++)
+    {
+        for (col = 0; col < BLE_ICON_W; col++)
+        {
+            if (BLE_ICON_BITS[row] & (1 << col))
+                obdSetPixel(&obd, x + col, y + row, 1, 1);
+        }
+    }
+}
+
 extern uint8_t mac_public[6];
 _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial)
 {
@@ -364,8 +421,15 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     char buff[100];
     sprintf(buff, "ESL_%02X%02X%02X %s", mac_public[2], mac_public[1], mac_public[0], epd_model_string[epd_model]);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 1, 17, (char *)buff, 1);
+#if EPD_USE_BLE_ICON
+    // v11.0: a Bluetooth rune instead of the letter "B".  Drawn only while a
+    // central is connected, exactly like the letter it replaces.
+    if (ble_get_connected())
+        epd_draw_ble_icon(BLE_ICON_X, BLE_ICON_Y);
+#else
     sprintf(buff, "%s", BLE_conn_string[ble_get_connected()]);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 232, 20, (char *)buff, 1);
+#endif
     sprintf(buff, "%02d:%02d", ((time_is / 60) / 60) % 24, (time_is / 60) % 60);
     obdWriteStringCustom(&obd, (GFXfont *)&DSEG14_Classic_Mini_Regular_40, 50, 65, (char *)buff, 1);
     sprintf(buff, "%d'C", EPD_read_temp());
