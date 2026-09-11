@@ -9,7 +9,27 @@
 
 // SSD1675 mixed with SSD1680 EPD Controller
 
-#define BWR_213_Len 50
+// ---------------------------------------------------------------------------
+// v8.0 power saving: length of the partial (per-minute) refresh waveform.
+// ---------------------------------------------------------------------------
+// This value is WS byte 60 of the 153-byte waveform setting written to
+// register 0x32, i.e. TP[0A] - "phase length in frames" of group 0 phase A
+// (SSD1680 Rev 0.14, Figure 6-6 on p.15; layout re-verified by
+// tools/verify_part_lut.py).  It is the ONLY non-zero TP/RP/SR value in this
+// table, so the whole partial waveform is exactly TP[0A] frames long, and the
+// panel drive time per minute is proportional to it.
+//
+// Upstream shipped 50 for every panel size.  v8.0 trims it by 20%: the panel is
+// re-driven every minute anyway, the identical waveform is applied again to any
+// pixel that has not changed, and the hourly full refresh (OTP waveform, all
+// 296 gates) re-establishes full contrast.  A weaker waveform therefore shows
+// up as slightly lighter / ghosted digits that are cleaned within the hour.
+//
+//   * digits look faint or leave ghosts -> raise back to 50 (v7.0 behaviour)
+//   * 40 looks perfectly solid          -> 32 can be tried next
+//   * COLD panels need a LONGER pulse, so do not go low if the tag lives
+//     somewhere cold (a shop freezer, an unheated room).
+#define BWR_213_Len 40
 uint8_t LUT_bwr_213_part[] = {
 
 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
