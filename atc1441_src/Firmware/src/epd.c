@@ -73,6 +73,22 @@ static const uint8_t BLE_ICON_BITS[BLE_ICON_H] = {
 // The drawing routine itself lives further down, just above epd_display(), so
 // that it sits below the global OBDISP obd that it writes into.
 
+// ---- v12.0: on-glass forensics for the "full refresh every few minutes" bug --
+// Four counters owned by app.c (see the v12.0 block there) are drawn next to
+// the temperature as "H0 T0 B0 L0".  H = the hour changed, and one per hour is
+// the DESIGNED full refresh; T = the panel temperature left its dead band;
+// B = the battery voltage left its dead band; L = the BLE connect state
+// flipped.  They saturate at 9, so the widest string is 11 glyphs = 107 px.
+//
+// Geometry (derived, see tools/verify_refresh_debug.py): the temperature "24'C"
+// in Special_Elite_Regular_30 at x=10 has ink x 10..71, so x=84 leaves a clean
+// gap, and the whole string stays inside the per-minute gate window (glass
+// x 54..190) so it is repainted on every tick.  Set EPD_USE_REFRESH_DEBUG to 0
+// to take it off the glass again - no other code depends on it.
+#define EPD_USE_REFRESH_DEBUG 1
+#define EPD_DEBUG_X 84
+#define EPD_DEBUG_Y 95
+
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
 RAM uint8_t epd_update_state = 0;
@@ -434,6 +450,11 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     obdWriteStringCustom(&obd, (GFXfont *)&DSEG14_Classic_Mini_Regular_40, 50, 65, (char *)buff, 1);
     sprintf(buff, "%d'C", EPD_read_temp());
     obdWriteStringCustom(&obd, (GFXfont *)&Special_Elite_Regular_30, 10, 95, (char *)buff, 1);
+#if EPD_USE_REFRESH_DEBUG
+    // v12.0: why the full refreshes are happening - see the define above.
+    sprintf(buff, "H%d T%d B%d L%d", dbg_hour, dbg_temp, dbg_batt, dbg_ble);
+    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, EPD_DEBUG_X, EPD_DEBUG_Y, (char *)buff, 1);
+#endif
     sprintf(buff, "Battery %dmV", battery_mv);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 10, 120, (char *)buff, 1);
     sprintf(buff, "%s", FW_VERSION_STRING);

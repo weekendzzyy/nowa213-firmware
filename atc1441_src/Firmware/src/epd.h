@@ -44,3 +44,8 @@ void epd_set_sleep(void);
 uint8_t epd_state_handler(void);
 void epd_display_char(uint8_t data);
 void epd_clear(void);
+
+// v12.0 forensics: the four "what forced a full refresh" counters are owned by
+// app.c and drawn by epd.c while EPD_USE_REFRESH_DEBUG is 1.  Each saturates
+// at 9.  See the v12.0 block in epd.c for what each letter means.
+extern uint8_t dbg_hour, dbg_temp, dbg_batt, dbg_ble;

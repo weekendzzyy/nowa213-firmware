@@ -43,6 +43,29 @@ RAM uint8_t  last_ble_shown  = 0xFF;   // last displayed BLE-connected state
 RAM int16_t  last_temp_shown = 0x7FFF; // last displayed panel temperature (degC)
 RAM uint16_t last_batt_shown = 0xFFFF; // last displayed battery voltage (mV)
 
+// ---- v12.0: full-refresh forensics (temporary) ------------------------------
+// The tag was reported to flash the WHOLE panel through black/white/black every
+// 1-4 minutes at a random interval.  `full` below can only be raised by four
+// things, so each one gets a counter and the four counters are drawn on the
+// glass (see EPD_USE_REFRESH_DEBUG in epd.c).  One glance after half an hour
+// says which of them is doing it instead of guessing at the physics.
+//
+//   H = the hour changed        - once an hour is the DESIGNED full refresh
+//   T = the panel temperature left its dead band
+//   B = the battery voltage left its dead band
+//   L = the BLE connect state flipped
+//
+// Saturated at 9 so the string always fits, and counted only when the refresh
+// is actually painted, so the on-glass numbers match the flashes the eye sees.
+// dbg_armed skips the very first tick, whose sentinel comparisons (0xFF /
+// 0x7FFF / 0xFFFF) are not real causes.
+RAM uint8_t  dbg_hour = 0;
+RAM uint8_t  dbg_temp = 0;
+RAM uint8_t  dbg_batt = 0;
+RAM uint8_t  dbg_ble  = 0;
+RAM uint8_t  dbg_armed = 0;
+#define DBG_BUMP(c) do { if ((c) < 9) (c)++; } while (0)
+
 // ---- v11.0: dead bands for the two analog sources ---------------------------
 // Up to v10.0 the panel temperature was compared with `!=`.  That is a trap.
 // The SSD1680 internal sensor is quantised to 1 degC, and the reading is taken
@@ -137,12 +160,14 @@ _attribute_ram_code_ void main_loop(void)
         // black/white/black refresh every few minutes instead of hourly.
         // ------------------------------------------------------------------
         uint8_t force_full = 0;
+        uint8_t cause_ble = 0, cause_temp = 0, cause_batt = 0; // v12.0 forensics
 
         uint8_t ble_now = ble_get_connected();
         if (ble_now != last_ble_shown)
         {
             last_ble_shown = ble_now;
             force_full = 1;
+            cause_ble = 1;
         }
 
         // v11.0: dead band instead of `!=` - see TEMP_FULL_HYSTERESIS_C above.
@@ -153,6 +178,7 @@ _attribute_ram_code_ void main_loop(void)
         {
             last_temp_shown = temp_now;
             force_full = 1;
+            cause_temp = 1;
         }
 
         if (last_batt_shown == 0xFFFF)
@@ -164,9 +190,11 @@ _attribute_ram_code_ void main_loop(void)
         {
             last_batt_shown = battery_mv;
             force_full = 1;
+            cause_batt = 1;
         }
 
-        uint8_t full = (current_hour != hour_refresh || force_full) ? 1 : 0;
+        uint8_t hour_changed = (current_hour != hour_refresh) ? 1 : 0;
+        uint8_t full = (hour_changed || force_full) ? 1 : 0;
         hour_refresh = current_hour;
 
         // v5.0 night silence: skip the repaint, but keep the bookkeeping above
@@ -185,7 +213,21 @@ _attribute_ram_code_ void main_loop(void)
         // v5.0: the panel is driven only when it is actually visible/useful -
         // never before the first paint of this power cycle, and not at night.
         // ------------------------------------------------------------------
-        if (force_refresh || !first_refresh_done || !night)
+        uint8_t paint = (force_refresh || !first_refresh_done || !night) ? 1 : 0;
+
+        // v12.0 forensics: tally only the full refreshes that are actually
+        // painted, so the on-glass counters match the flashes the eye sees.
+        // Done BEFORE epd_display() because that is what draws them.
+        if (paint && full && dbg_armed)
+        {
+            if (cause_ble)    DBG_BUMP(dbg_ble);
+            if (cause_temp)   DBG_BUMP(dbg_temp);
+            if (cause_batt)   DBG_BUMP(dbg_batt);
+            if (hour_changed) DBG_BUMP(dbg_hour);
+        }
+        dbg_armed = 1;
+
+        if (paint)
         {
             epd_display(get_time(), battery_mv, temperature, full);
             first_refresh_done = 1;

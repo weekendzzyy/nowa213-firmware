@@ -20,7 +20,7 @@ extern "C" {
 // metrics and FAILS if the constant in epd.c no longer matches, so a lengthened
 // version string cannot silently drift off the right edge.
 // Format: "v<major>.<minor>"  (the badge is sized for up to 6 characters)
-#define FW_VERSION_STRING "v11.0"
+#define FW_VERSION_STRING "v12.0"
 
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 

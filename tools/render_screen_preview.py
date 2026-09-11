@@ -18,11 +18,12 @@
 #   2  BLE rune (v11.0)        BLE_ICON_BITS[13] in epd.c  ( 233,   8)
 #   3  "HH:MM"                 DSEG14_Classic_Mini_...40   (  50,  65)
 #   4  "NN'C"                  Special_Elite_Regular_30    (  10,  95)
+#   4b "Hn Tn Bn Ln" (v12.0)   Dialog_plain_16             (EPD_DEBUG_X, 95)
 #   5  "Battery NNNNmV"        Dialog_plain_16             (  10, 120)
 #   6  FW_VERSION_STRING       Dialog_plain_16             (EPD_VERSION_X, 120)
 #
 # Usage:
-#   python tools/render_screen_preview.py                  # v10.0 default
+#   python tools/render_screen_preview.py                  # v12.0 default
 #   python tools/render_screen_preview.py --no-badge       # what v9.0 looked like
 #   python tools/render_screen_preview.py --zoom 4
 # =============================================================================
@@ -148,6 +149,11 @@ def render(with_badge=True, with_ble=True):
     # icon there is reflected here with no second place to keep in sync.
     bx, by, bw, bh, brows = load_ble_icon()
     use_icon = read_define('epd.c', 'EPD_USE_BLE_ICON', '1') == '1'
+    # v12.0 forensics: the four full-refresh counters, off at boot (H0 T0 B0 L0).
+    # Position comes from epd.c so it tracks the firmware with no second copy.
+    dx = int(read_define('epd.c', 'EPD_DEBUG_X', '84'))
+    dy = int(read_define('epd.c', 'EPD_DEBUG_Y', '95'))
+    use_dbg = read_define('epd.c', 'EPD_USE_REFRESH_DEBUG', '0') == '1'
 
     px = bytearray(VDISP_W * VDISP_H)
 
@@ -159,10 +165,12 @@ def render(with_badge=True, with_ble=True):
             draw_string(px, *g16, 232, 20, 'B')            # 2b legacy letter
     draw_string(px, *g60, 50, 65, '14:23')                 # 3 clock
     draw_string(px, *g30, 10, 95, "25'C")                  # 4 temperature
+    if use_dbg:
+        draw_string(px, *g16, dx, dy, 'H0 T0 B0 L0')       # 4b v12.0 forensics
     draw_string(px, *g16, 10, 120, 'Battery 3600mV')       # 5 battery
     if with_badge:
         draw_string(px, *g16, vx, vy, ver)                 # 6 version badge
-    return px, (vx, vy, ver), (bx, by, bw, bh, use_icon)
+    return px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg)
 
 
 def to_image(px, zoom, glass_only=False):
@@ -184,11 +192,11 @@ def main():
     ap.add_argument('--zoom', type=int, default=3)
     args = ap.parse_args()
 
-    px, (vx, vy, ver), (bx, by, bw, bh, use_icon) = render(
+    px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg) = render(
         with_badge=not args.no_badge, with_ble=not args.no_ble)
     os.makedirs(OUTDIR, exist_ok=True)
 
-    tag = 'v10' if args.no_badge else 'v11'
+    tag = 'v10' if args.no_badge else 'v12'
     main_png = os.path.join(OUTDIR, 'screen_%s_zoom%d.png' % (tag, args.zoom))
     to_image(px, args.zoom).save(main_png)
     print('wrote %s  (%dx%d)' % (main_png, VDISP_W * args.zoom, GLASS_H * args.zoom))
@@ -252,6 +260,9 @@ def main():
               % (bx, by, bw, bh))
     else:
         print('ble indicator at x=%d y=%d  legacy letter "B"' % (bx, by))
+    if use_dbg:
+        print('refresh counters at x=%d y=%d  "H0 T0 B0 L0" (boot state)'
+              % (dx, dy))
     return 0
 
 
