@@ -22,6 +22,16 @@ extern const uint8_t ucMirror[];
 #include "font16.h"
 #include "font30.h"
 
+// v10.0: firmware-version badge, bottom-right corner.  Same font as the battery
+// line (Dialog_plain_16, baseline y = 120) but right-aligned on the virtual
+// display:  x = 250 - 2 - width(FW_VERSION_STRING).
+// width("v10.0") = 49 px, from the real xAdvance values in font16.h
+// (v=10, 1=11, 0=11, .=6) -> x = 199.  tools/verify_version_badge.py re-derives
+// this from the font metrics and the string in app_config.h, and fails if the
+// three ever disagree, so a longer version cannot silently run off the edge.
+#define EPD_VERSION_X 199
+#define EPD_VERSION_Y 120
+
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
 RAM uint8_t epd_update_state = 0;
@@ -362,6 +372,8 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     obdWriteStringCustom(&obd, (GFXfont *)&Special_Elite_Regular_30, 10, 95, (char *)buff, 1);
     sprintf(buff, "Battery %dmV", battery_mv);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 10, 120, (char *)buff, 1);
+    sprintf(buff, "%s", FW_VERSION_STRING);
+    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, EPD_VERSION_X, EPD_VERSION_Y, (char *)buff, 1);
     FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
     EPD_Display(epd_buffer, resolution_w * resolution_h / 8, full_or_partial);
 }

@@ -596,3 +596,80 @@ while (clock_time() - last_clock_increase >= one_second_trimmed)
 **发布文件**：`firmware_releases/atc1441_clockonly_v9.0_2026-09-11_90988B.bin`
 **SHA256**：`9428b77dcf6effa693ee5d0e37633131bd93dc4de68ebf14be13f1bf57d0edfd`
 **大小**：90988 字节
+
+---
+
+## v10.0 — 2026-09-11（屏幕右下角显示固件版本）
+
+### 需求
+
+在屏幕右下角显示当前固件版本，格式 `v<major>.<minor>`，字号与电压值相同。
+
+### 实现（源码只新增 21 行，零删除）
+
+| 文件 | 改动 |
+|---|---|
+| `app_config.h` | 新增 `#define FW_VERSION_STRING "v10.0"` |
+| `epd.c` | 新增 `EPD_VERSION_X 199` / `EPD_VERSION_Y 120`，并在 `epd_display()` 里加两行 |
+
+绘制刻意**沿用电压行的字体与基线**（`Dialog_plain_16`，基线 y=120），只把 x 改成右对齐：
+
+```
+x = 250 - 2 - width("v10.0") = 250 - 2 - 49 = 199
+width 由 font16.h 的真实 xAdvance 相加：v=10, 1=11, 0=11, .=6  ->  49
+```
+
+`y` 是**基线**不是顶边（`obdWriteStringCustom()` 的语义），所以墨迹实际落在 y 108..119，
+在可见玻璃（0..121）之内；x 墨迹 199..246，距右边缘 3 px。
+
+### 与 v7.0 局部刷新窗口的关系：零成本
+
+徽章墨迹在玻璃 x 199..246，由 `RAM_Y = glass_x + 47` 得栅极 **246..293**，
+而每分钟驱动的窗口是栅极 101..237 → **徽章完全在窗口之外，不增加每分钟的刷新开销**。
+版本号是编译期常量，只需要全刷；而全刷本来就会重画它（首次上电、整点、以及 BLE/温度/电量
+变化触发的 force_full）。首次刷新一定是全刷（`hour_refresh` 初值 100 ≠ 任何合法小时），
+所以一上电右下角就有版本号，不需要等整点。
+
+### 验证
+
+- **新增 `tools/verify_version_badge.py`（离线几何校验，全部 PASS）**
+  从 `font16.h` / `font30.h` 解析**真实字形度量**，复现 `obdWriteStringCustom()` 的排版，
+  并读取 `FW_VERSION_STRING` / `EPD_VERSION_X` / `EPD_VERSION_Y`：
+  - `width("v10.0") = 49` 与 `EPD_VERSION_X = 199` 一致（**这条是防漂移断言**：
+    以后把版本号改长了却忘了改 x，脚本会直接 FAIL）；
+  - 墨迹 x [199,246] / y [108,119] 均在 250×122 可见区内；
+  - 与最宽可能的电压行 `"Battery 65535mV"`（墨迹右边界 162）相距 **36 px**，不重叠；
+  - 与温度行（y 73..95）在 y 方向不重叠；
+  - 在每分钟窗口（gate 101..237）之外 → 零额外成本。
+- **反汇编核对**（`tc32-elf-objdump -d out/epd.o`）：`epd_display` 里电压行之后确实新增
+  `cmd → sprintf(buff,"%s",FW_VERSION_STRING)` → `obdWriteStringCustom(buff, Dialog_plain_16,
+  x, y)`，且立即数就是 `tmovs r2, #199` / `tmovs r3, #120`，与脚本预言**逐字节一致**。
+- **镜像里能找到该字符串**：`"v10.0\0"` 位于 0x113A4（前后紧邻 `"Battery %dmV"` 与
+  `epd_model_string[0]="NC"` 的字符串池）。
+- **段大小对比**（用 `git worktree` 从 tag `v9.0` 独立重建基线）：
+  `.ram_code` 0x4b80 → 0x4ba0（**+32 B**，新代码）；
+  `.rodata` 0x5750 → 0x5758（**+8 B**，就是 `"v10.0\0"`）；
+  `.vectors` / `.text` / `.data` / `.bss` **大小完全不变**；
+  `.retention_data` 仅 VMA 上移 0x20（所以镜像里其余差异都是指向 RAM 变量的字面量地址 +0x20，
+  属预期涟漪）。`_end_bss_ = 0x84efc1` 与 v3.0~v9.0 **完全一致** → 无 SRAM 风险。
+- **构建可复现**：从 tag `v9.0` 重建的 bin 与归档的 v9.0 固件逐字节一致。
+- **新增 `tools/render_screen_preview.py`（离线屏幕预览器）**
+  解析真实字体位图，把 `epd_display()` 的整屏内容渲染成 PNG（默认 3× 放大），
+  另有右下角 6× 特写。以后任何排版改动都能先看效果再刷机，不用为了确认几个像素往返刷写。
+  生成 `previews/screen_v10_zoom3.png`、`previews/badge_zoom6.png`、`previews/screen_v9_zoom3.png`。
+
+### ⚠️ 发版流程：版本号要改三处
+
+以后每次发版，除了 CHANGELOG / 归档 / 打 tag，**还要改 `app_config.h` 的
+`FW_VERSION_STRING`**，否则屏幕上的版本号会滞后。`tools/verify_version_badge.py`
+会检查字符串与 x 坐标是否匹配，但不会替你检查它是否跟上了 tag。
+
+### 上机判定
+
+- ✅ 右下角出现 `v10.0`，字体与 `Battery ...mV` 完全一致，位置不挤不越界。
+- 若想微调位置：只改 `epd.c` 的 `EPD_VERSION_X`，然后跑一次
+  `tools/verify_version_badge.py` 确认右对齐断言仍 PASS。
+
+**发布文件**：`firmware_releases/atc1441_clockonly_v10.0_2026-09-11_90996B.bin`
+**SHA256**：`26e57a6b644440218a9ff9e5b4654423cf0414816630741aa1c8cf074249d446`
+**大小**：90996 字节

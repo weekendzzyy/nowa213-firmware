@@ -13,6 +13,15 @@ extern "C" {
 // the tag. BLE spec caps adv interval at 10.24 s (16384), so 16000 is legal.
 #define ADVERTISING_INTERVAL 16000
 
+// Firmware version, drawn in the bottom-right corner of the clock screen
+// (see epd.c -> epd_display()).  Bump this together with the git tag and the
+// firmware_releases/ file name.  tools/verify_version_badge.py reads this
+// string, recomputes the right-aligned x from the real Dialog_plain_16 font
+// metrics and FAILS if the constant in epd.c no longer matches, so a lengthened
+// version string cannot silently drift off the right edge.
+// Format: "v<major>.<minor>"  (the badge is sized for up to 6 characters)
+#define FW_VERSION_STRING "v10.0"
+
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 
 #include "application/print/u_printf.h"
