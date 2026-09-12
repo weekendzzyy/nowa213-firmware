@@ -313,9 +313,27 @@ function calcCrc(bytes){
 
 async function commitFirmware(){
   const crc = calcCrc(firmware);
+  const magic = [0x07, 0xC0, 0x01, 0xCE, 0xED, (crc>>>8)&0xff, crc&0xff];
   log('提交 magic：07 C0 01 CE ED ' + (((crc>>>8)&0xff).toString(16)) + ' ' + ((crc&0xff).toString(16)) +
       '  （设备会忽略该 CRC，真正的保障是上面的回读校验）');
-  await write([0x07, 0xC0, 0x01, 0xCE, 0xED, (crc>>>8)&0xff, crc&0xff]);
+  try{
+    await write(magic);
+  }catch(e){
+    // A commit makes the device erase 0x00000-0x1FFFF and reboot, so the ATT
+    // response may never come back.  Chrome surfaces that as
+    // "NotSupportedError: GATT operation failed for unknown reason", which is
+    // NOT evidence that the commit was lost.  If the link dropped, the device
+    // is rebooting on the new firmware; if it is still here, the write really
+    // did not land, so try once more.
+    const gone = !(device && device.gatt && device.gatt.connected);
+    if (gone){
+      log('提交写入未收到应答，但设备已断开 —— 这是设备在重启，提交应已生效。请看屏幕确认。');
+      return;
+    }
+    log('提交写入失败且设备仍在线，重试一次…');
+    await delay(800);
+    await write(magic);
+  }
   log('提交命令已发送。设备正在擦写 0x00000–0x1FFFF 并重启，连接会断开，这是正常的。');
 }
 
@@ -325,25 +343,37 @@ async function flashFirmware(){
   if (busy) return;
   busy = true;
   $('flashBtn').disabled = true;
+  let stage = '开始';
   try{
     log('=== 开始刷写：' + firmware.length + ' 字节 ===');
     setProg(0);
+    stage = '擦除 OTA 区';
     await eraseFwArea();
+    stage = '上传镜像';
     await uploadImage(firmware);
+    stage = '回读校验';
     if ($('verifyChk').checked){
       await verifyImage(firmware);
     } else {
       log('已跳过回读校验（风险自负）');
       setProg(95);
     }
+    stage = '提交';
     await primeFinalGate();
     await commitFirmware();
     setProg(100);
-    setStatus('完成：设备正在切换固件并重启');
+    setStatus('完成：设备正在切换固件并重启（重启后先校时，时间已归零）');
   }catch(e){
-    setStatus('中止：未提交，设备仍运行旧固件');
-    log('错误: ' + e);
-    log('设备未被改动（只有在最后一步「提交」之后才会切换固件）。可修正后重试。');
+    if (stage === '提交'){
+      setStatus('提交阶段出错 —— 设备可能已在重启，请看屏幕确认');
+      log('错误（提交阶段）: ' + e);
+      log('提交是最后一步：屏幕已是新版式就是成功了；若仍是旧界面（DSEG 时钟 + Battery 行），' +
+          '重连再刷一次即可，设备未被改动。');
+    } else {
+      setStatus('中止于「' + stage + '」，未提交，设备仍运行旧固件');
+      log('错误（' + stage + ' 阶段）: ' + e);
+      log('设备未被改动（只有在最后一步「提交」之后才会切换固件）。可修正后重试。');
+    }
   }finally{
     busy = false;
     $('flashBtn').disabled = false;
