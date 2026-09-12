@@ -115,9 +115,10 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 
 - **`-t 3000`（关键）**：片上若已跑着 atc1441 固件，其深睡带 retention 标志会让
   `-t 200` 的复位拽不回 bootloader，报 `Chip sleep?`。延长激活窗口到 3 秒即可。
-- **校验（强烈建议）**：写完整片读回逐字节比对，避免「读回瞬断假象」误判：
+- **校验（强烈建议）**：写完整片读回逐字节比对，避免「读回瞬断假象」误判。
+  读回长度 = 固件字节数（v14.1 = 82468 = `0x14224`；发布文件名里就有）：
   ```powershell
-  python TLSR825xComFlasher.py -p COM6 -t 3000 rf 0 0x1635c verify.bin
+  python TLSR825xComFlasher.py -p COM6 -t 3000 rf 0 0x14224 verify.bin
   python -c "a=open('<固件>.bin','rb').read();b=open('verify.bin','rb').read();print('MATCH' if a==b[:len(a)] else 'MISMATCH')"
   ```
   > 首跑偶尔出现零星 `0xFF` 块（读回瞬断），重刷一次再读回即 MATCH，非真写入损坏。
