@@ -196,8 +196,16 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_read_temp(void)
 //   RAM write    : index i = col*16 + byteY -> RAM X = byteY, RAM Y = 296 - col
 //                  (0x11 = 0x01: X increments, Y decrements; 0x4F = 0x0128)
 //   hence        : glass_x = 249 - col = RAM_Y - 47
-// The clock ink spans glass x [54,190] over all 1440 times, i.e. RAM rows
-// [101,237] - the driven range below is that range exactly.
+// The driven range is the MINUTE digits, not the whole clock.  v14.0 made the
+// clock much bigger (76 px tall, 42 px per digit) but the window still got
+// smaller, because the hour digits do not change on a minute tick and the top
+// of the hour already does a full refresh: only the last two digits have to be
+// scanned.  Their x position slides with the hour - a '1' is narrower than the
+// other digits - so the window is the union over all 24 hours, which
+// tools/verify_v14_layout.py walks and then checks against epd_layout.h.
+//
+// The constants live in epd_layout.h, next to the clock geometry they are
+// derived from; only the driver-private pieces are here.
 //
 // THE DATA PATH IS DELIBERATELY UNCHANGED: the full 250x16-byte frame is still
 // streamed to the same RAM addresses, and 0x44/0x45/0x4E/0x4F are untouched.
@@ -207,17 +215,10 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_read_temp(void)
 // ============================================================================
 #define EPD_USE_GATE_WINDOW 1
 
-#define EPD_WIN_GATE_FIRST 101   // first DRIVEN gate -> 0x0F SCN[8:0]
-#define EPD_WIN_GATE_LAST  237   // last  DRIVEN gate
-#define EPD_WIN_GATES      (EPD_WIN_GATE_LAST - EPD_WIN_GATE_FIRST + 1)   // 137
-#define EPD_WIN_GD_SM_TB   0x01  // GD=0, SM=0, TB=1 - unchanged from the full path
+#include "epd_layout.h"
 
-#if EPD_WIN_GATES < 16 || EPD_WIN_GATES > 296
-#error "gate window: MUX ratio must stay within 16..296 (SSD1680 p.34)"
-#endif
-#if EPD_WIN_GATE_FIRST < 0 || EPD_WIN_GATE_LAST > 295
-#error "gate window: driven gates must stay within 0..295 (SSD1680 p.36)"
-#endif
+#define EPD_WIN_GATES    (EPD_WIN_GATE_LAST - EPD_WIN_GATE_FIRST + 1)
+#define EPD_WIN_GD_SM_TB 0x01  // GD=0, SM=0, TB=1 - unchanged from the full path
 
 _attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size, uint8_t full_or_partial)
 {    

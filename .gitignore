@@ -35,9 +35,13 @@ epd_preview/
 *_demo.png
 
 # ---- Rendered screen previews ----
-# Regenerate: python tools/render_screen_preview.py --zoom 3
-# The one image that is referenced by README.md is tracked separately as
-# docs/images/screen-v12.0.png so the docs never depend on a build artefact.
+# Regenerate: python tools/render_screen_preview.py
+# The images the docs actually reference are tracked under docs/images/ so the
+# docs never depend on a build artefact:
+#   screen-v13.0.png        the face v13.0 shipped (kept for comparison)
+#   screen-v14.0.png        the current face
+#   reference-vs-v14.0.png  the current face under the reference panel
+#   reference-panel.png     the photograph the v14.0 layout was measured from
 previews/
 
 # ---- Generated test image sets ----

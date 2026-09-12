@@ -10,6 +10,8 @@ $(OUT_PATH)/flash.o \
 $(OUT_PATH)/time.o \
 $(OUT_PATH)/epd_spi.o \
 $(OUT_PATH)/epd.o \
+$(OUT_PATH)/epd_font.o \
+$(OUT_PATH)/calendar.o \
 $(OUT_PATH)/epd_bw_213.o \
 $(OUT_PATH)/epd_bwr_213.o \
 $(OUT_PATH)/epd_bwr_350.o \

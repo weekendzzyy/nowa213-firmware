@@ -37,6 +37,8 @@ SOURCES = [
     ("src/time.c", "", ""),
     ("src/epd_spi.c", "", ""),
     ("src/epd.c", "", ""),
+    ("src/epd_font.c", "", ""),
+    ("src/calendar.c", "", ""),
     ("src/epd_bw_213.c", "", ""),
     ("src/epd_bwr_213.c", "", ""),
     ("src/epd_bwr_350.c", "", ""),

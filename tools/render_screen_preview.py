@@ -1,301 +1,324 @@
 #!/usr/bin/env python3
 # =============================================================================
-# render_screen_preview.py - offline renderer for the clock screen
+# render_screen_preview.py - offline renderer for the v14.0 clock face
 # -----------------------------------------------------------------------------
-# Reproduces epd.c -> epd_display() pixel for pixel on a 250x122 canvas, so any
-# layout change can be SEEN before flashing the tag.  It parses the real font
-# headers (bitmaps + glyph tables) and mirrors OneBitDisplay's layout rules:
+# Draws the face the firmware will draw, without a tag on the bench, so a layout
+# change can be SEEN before it is flashed.
 #
-#   obdWriteStringCustom(pOBD, pFont, x, y, msg, color)
-#     - y is a BASELINE, not a top edge
-#     - each glyph is stamped at (pen + xOffset, y + yOffset)
-#     - pen += xAdvance
-#     - the bitmap is a CONTINUOUS MSB-first bit stream; rows are NOT re-aligned
-#       to byte boundaries (obd.inl carries iBitOff across the row loop)
+# The drawing is not re-implemented here.  tools/epd_face_model.py is the
+# line-for-line mirror of epd_font.c / epd.c / calendar.c, and it is the same
+# module tools/verify_v14_layout.py measures - so the preview and the checks
+# cannot drift apart, and neither can drift from the firmware without the
+# other noticing.
 #
-# Elements drawn, in the order epd_display() draws them:
-#   1  "ESL_xxxxxx MODEL"      Dialog_plain_16             (   1,  17)
-#   2  BLE rune (v11.0)        BLE_ICON_BITS[13] in epd.c  ( 233,   8)
-#   3  "HH:MM"                 DSEG14_Classic_Mini_...40   (  50,  65)
-#   4  "NN'C"                  Special_Elite_Regular_30    (  10,  95)
-#   4b "HnnTnBnLn" (v12.0)    Dialog_plain_16             (EPD_DEBUG_X, 95)
-#      the counters are OFF the glass in v13.0 - --with-debug draws them anyway
-#   5  "Battery NNNNmV"        Dialog_plain_16             (  10, 120)
-#   6  FW_VERSION_STRING       Dialog_plain_16             (EPD_VERSION_X, 120)
+# No third-party imports: the PNG writer below is ~20 lines of zlib and struct.
+# Pillow was the only reason this needed the system interpreter.
 #
 # Usage:
-#   python tools/render_screen_preview.py                  # v13.0 default
-#   python tools/render_screen_preview.py --no-badge       # what v9.0 looked like
-#   python tools/render_screen_preview.py --with-debug     # show the counters
+#   python tools/render_screen_preview.py                     # the reference photo
+#   python tools/render_screen_preview.py --window            # + the partial band
+#   python tools/render_screen_preview.py --date 2028-06-23 --temp -12
+#   python tools/render_screen_preview.py --time 00:00 --mv 9999 --no-ble
+#   python tools/render_screen_preview.py --debug 18,0,1,2    # counters on row 3
 #   python tools/render_screen_preview.py --zoom 4
 # =============================================================================
 import argparse
+import datetime
 import os
-import re
+import struct
 import sys
+import zlib
 
-from PIL import Image, ImageDraw
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from epd_face_model import Face, bits, new_buffer  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..'))
-SRC = os.path.join(ROOT, 'atc1441_src', 'Firmware', 'src')
 OUTDIR = os.path.join(ROOT, 'previews')
 
-VDISP_W, VDISP_H = 250, 128
-GLASS_H = 122
-
-PAPER = (246, 245, 240)      # e-paper white
-INK = (24, 24, 26)           # e-paper black
-
-
-# ---------------------------------------------------------------------------
-# font parsing
-# ---------------------------------------------------------------------------
-def _strip_comments(body):
-    return re.sub(r'//[^\n]*', '', body)
-
-
-def load_font(header, font):
-    """Return (bitmap_bytes, glyphs).  Glyph keys are the printable characters
-    taken from the trailing comments of the glyph table."""
-    path = os.path.join(SRC, header)
-    text = open(path, encoding='utf-8', errors='ignore').read()
-
-    m = re.search(r'const uint8_t %sBitmaps\[\][^=]*=\s*\{(.*?)\n\};' % font, text, re.S)
-    if not m:
-        sys.exit('no bitmap table for %s in %s' % (font, header))
-    data = bytes(int(v, 0) for v in re.findall(r'0x[0-9a-fA-F]+', _strip_comments(m.group(1))))
-
-    m = re.search(r'const GFXglyph %sGlyphs\[\][^=]*=\s*\{(.*?)\n\};' % font, text, re.S)
-    if not m:
-        sys.exit('no glyph table for %s in %s' % (font, header))
-    body = m.group(1)
-    glyphs = {}
-    rows = re.findall(r'\{\s*([-\d]+)\s*,\s*([-\d]+)\s*,\s*([-\d]+)\s*,\s*([-\d]+)\s*,'
-                      r'\s*([-\d]+)\s*,\s*([-\d]+)\s*\}', body)
-    ff = re.search(r'const GFXfont %s [^=]*= \{[^}]*\}\s*,?\s*0x([0-9a-fA-F]+)\s*,' % font, text)
-    first = int(ff.group(1), 16) if ff else 0x20
-    for i, r in enumerate(rows):
-        off, w, h, adv, xo, yo = [int(v) for v in r]
-        glyphs[chr(first + i)] = dict(off=off, w=w, h=h, adv=adv, xo=xo, yo=yo)
-    return data, glyphs
+PAPER = (246, 245, 240)
+INK = (24, 24, 26)
+BAND_FILL = (250, 232, 218)
+BAND_EDGE = (214, 120, 60)
+BOX = (200, 30, 40)
 
 
 # ---------------------------------------------------------------------------
-# drawing
+# a minimal PNG writer: 8-bit RGB, filter 0, one IDAT
 # ---------------------------------------------------------------------------
-def draw_string(px, data, glyphs, x, y, text):
-    """Mirror of obdWriteStringCustom().  px is a bytearray of VDISP_W*VDISP_H,
-    row major, 1 = ink."""
-    pen = x
-    for ch in text:
-        g = glyphs.get(ch)
-        if g is None:
-            continue
-        nbits = g['w'] * g['h']
-        for k in range(nbits):
-            byte = data[g['off'] + (k >> 3)]
-            if not (byte >> (7 - (k & 7))) & 1:
-                continue
-            cx = pen + g['xo'] + (k % g['w'])
-            cy = y + g['yo'] + (k // g['w'])
-            if 0 <= cx < VDISP_W and 0 <= cy < VDISP_H:
-                px[cy * VDISP_W + cx] = 1
-        pen += g['adv']
-    return pen
-
-
-def load_ble_icon():
-    """v11.0: parse the Bluetooth rune straight out of epd.c, so the preview can
-    never drift from what the firmware actually draws.  Returns (x, y, w, h, rows)."""
-    text = open(os.path.join(SRC, 'epd.c'), encoding='utf-8', errors='ignore').read()
-
-    def num(name, default):
-        m = re.search(r'#define\s+%s\s+(\d+)' % name, text)
-        return int(m.group(1)) if m else default
-
-    m = re.search(r'BLE_ICON_BITS\s*\[[^\]]*\]\s*=\s*\{(.*?)\};', text, re.S)
-    if not m:
-        sys.exit('no BLE_ICON_BITS[] table in epd.c')
-    rows = [int(v, 0) for v in re.findall(r'0x[0-9a-fA-F]+', m.group(1))]
-    return (num('BLE_ICON_X', 233), num('BLE_ICON_Y', 8),
-            num('BLE_ICON_W', 7), num('BLE_ICON_H', 13), rows)
-
-
-def draw_ble_icon(px, x, y, w, h, rows):
-    """Mirror of epd_draw_ble_icon(): bit n of a row -> pixel (x + n, y + row)."""
-    for r in range(h):
-        for c in range(w):
-            if rows[r] & (1 << c):
-                cx, cy = x + c, y + r
-                if 0 <= cx < VDISP_W and 0 <= cy < VDISP_H:
-                    px[cy * VDISP_W + cx] = 1
-
-
-def load_debug_sample():
-    """The on-glass refresh counters as they read at boot, parsed out of epd.c.
-
-    The format string lives in the firmware, so widening a counter there (v13.0
-    gave H two digits) is reflected here with no second copy to keep in sync.
-    Picked by arity - the one sprintf with a slot per counter - exactly like
-    tools/verify_refresh_debug.py does, so reordering the draws cannot fool it.
-    """
-    text = open(os.path.join(SRC, 'epd.c'), encoding='utf-8', errors='ignore').read()
-    for m in re.finditer(r'sprintf\(buff,\s*"([^"]*)"\s*,([^;]*?)\);', text):
-        fmt = m.group(1)
-        if len(re.findall(r'%\d*d', fmt)) == 4:
-            return re.sub(r'%(\d*)d',
-                          lambda mm: '0'.rjust(int(mm.group(1) or 1), '0'), fmt)
-    return 'H00T0B0L0'
-
-
-def read_define(path, name, default=None):
-    text = open(os.path.join(SRC, path), encoding='utf-8', errors='ignore').read()
-    m = re.search(r'#define\s+%s\s+"?([^"\n]+)"?' % name, text)
-    return m.group(1).strip() if m else default
-
-
-def render(with_badge=True, with_ble=True, with_debug=None):
-    g16 = load_font('font16.h', 'Dialog_plain_16')
-    g30 = load_font('font30.h', 'Special_Elite_Regular_30')
-    g60 = load_font('font_60.h', 'DSEG14_Classic_Mini_Regular_40')
-
-    ver = read_define('app_config.h', 'FW_VERSION_STRING', 'v0.0')
-    vx = int(read_define('epd.c', 'EPD_VERSION_X', '199'))
-    vy = int(read_define('epd.c', 'EPD_VERSION_Y', '120'))
-    # v11.0 BLE indicator: the bare letter "B" was replaced by a drawn rune.
-    # Both its geometry and its bitmap are parsed out of epd.c, so editing the
-    # icon there is reflected here with no second place to keep in sync.
-    bx, by, bw, bh, brows = load_ble_icon()
-    use_icon = read_define('epd.c', 'EPD_USE_BLE_ICON', '1') == '1'
-    # The four full-refresh counters, off at boot ("H00T0B0L0").  Their position
-    # and their format both come from epd.c, and v13.0 ships with the switch at
-    # 0 - so the preview shows a clean screen by default, and --with-debug draws
-    # the counters anyway to check the layout without rebuilding firmware.
-    dx = int(read_define('epd.c', 'EPD_DEBUG_X', '84'))
-    dy = int(read_define('epd.c', 'EPD_DEBUG_Y', '95'))
-    dbg_txt = load_debug_sample()
-    if with_debug is None:
-        use_dbg = read_define('epd.c', 'EPD_USE_REFRESH_DEBUG', '0') == '1'
-    else:
-        use_dbg = with_debug
-
-    px = bytearray(VDISP_W * VDISP_H)
-
-    draw_string(px, *g16, 1, 17, 'ESL_140EC6 BWR213')      # 1 model line
-    if with_ble:
-        if use_icon:
-            draw_ble_icon(px, bx, by, bw, bh, brows)       # 2a BLE rune (v11.0)
-        else:
-            draw_string(px, *g16, 232, 20, 'B')            # 2b legacy letter
-    draw_string(px, *g60, 50, 65, '14:23')                 # 3 clock
-    draw_string(px, *g30, 10, 95, "25'C")                  # 4 temperature
-    if use_dbg:
-        draw_string(px, *g16, dx, dy, dbg_txt)             # 4b refresh counters
-    draw_string(px, *g16, 10, 120, 'Battery 3600mV')       # 5 battery
-    if with_badge:
-        draw_string(px, *g16, vx, vy, ver)                 # 6 version badge
-    return (px, (vx, vy, ver), (bx, by, bw, bh, use_icon),
-            (dx, dy, use_dbg, dbg_txt))
-
-
-def to_image(px, zoom, glass_only=False):
-    h = GLASS_H if glass_only else VDISP_H
-    img = Image.new('RGB', (VDISP_W, h), PAPER)
-    d = ImageDraw.Draw(img)
+def write_png(path, w, h, pix):
+    raw = bytearray()
     for y in range(h):
-        for x in range(VDISP_W):
-            if px[y * VDISP_W + x]:
-                d.point((x, y), fill=INK)
-    return img.resize((VDISP_W * zoom, h * zoom), Image.NEAREST)
+        raw.append(0)
+        row = pix[y * w:(y + 1) * w]
+        for p in row:
+            raw += bytes(p)
+
+    def chunk(tag, data):
+        return (struct.pack('>I', len(data)) + tag + data
+                + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    with open(path, 'wb') as fh:
+        fh.write(b'\x89PNG\r\n\x1a\n'
+                 + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+                 + chunk(b'IEND', b''))
+
+
+class Canvas(object):
+    """A small RGB bitmap with the two operations the previews need: fill a
+    rectangle (the band tint and the red boxes) and blit the 1-bit face."""
+
+    def __init__(self, w, h, bg=PAPER):
+        self.w, self.h = w, h
+        self.p = [bg] * (w * h)
+
+    def rect(self, x0, y0, x1, y1, colour, edge=False):
+        for y in range(max(0, y0), min(self.h, y1 + 1)):
+            for x in range(max(0, x0), min(self.w, x1 + 1)):
+                if edge and x0 < x < x1 and y0 < y < y1:
+                    continue
+                self.p[y * self.w + x] = colour
+
+    def ink(self, rows, x0, y0):
+        for y, row in enumerate(rows):
+            base = (y0 + y) * self.w
+            for x, v in enumerate(row):
+                if v:
+                    self.p[base + x0 + x] = INK
+
+    def blit_rgb(self, rows, x0, y0):
+        """Paste an RGB row-major image (from read_png or resample)."""
+        for y, row in enumerate(rows):
+            if not 0 <= y0 + y < self.h:
+                continue
+            base = (y0 + y) * self.w
+            for x, c in enumerate(row):
+                if 0 <= x0 + x < self.w:
+                    self.p[base + x0 + x] = c
+
+    def scaled(self, z):
+        out = Canvas(self.w * z, self.h * z)
+        for y in range(self.h):
+            for x in range(self.w):
+                c = self.p[y * self.w + x]
+                for dy in range(z):
+                    base = (y * z + dy) * out.w + x * z
+                    for dx in range(z):
+                        out.p[base + dx] = c
+        return out
+
+    def save(self, path, z=1):
+        img = self.scaled(z) if z != 1 else self
+        write_png(path, img.w, img.h, img.p)
+
+
+def bits_rgb(rows, w, h):
+    """The 1-bit face as RGB rows, so it can be pasted into a composite."""
+    return [[INK if v else PAPER for v in row[:w]] for row in rows[:h]]
+
+
+def scale_rgb(rows, z):
+    """Nearest-neighbour upscale, the RGB-rows counterpart of Canvas.scaled()."""
+    out = []
+    for row in rows:
+        wide = [c for px in row for c in (px, ) * z]
+        for _ in range(z):
+            out.append(wide)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# a minimal PNG reader: 8-bit RGB, non-interlaced, the one shape write_png emits
+# ---------------------------------------------------------------------------
+def read_png(path):
+    """(w, h, pixels) for an 8-bit RGB PNG, or raise ValueError.
+
+    Only the form write_png() produces is accepted, so the two functions and the
+    reference photograph stored next to them stay in one dialect.  Anything else
+    (palette, 16-bit, interlaced) is refused by name rather than mis-decoded.
+    """
+    data = open(path, 'rb').read()
+    if data[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError('%s is not a PNG' % path)
+
+    pos, hdr, idat = 8, None, bytearray()
+    while pos + 8 <= len(data):
+        n = struct.unpack('>I', data[pos:pos + 4])[0]
+        tag = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + n]
+        if tag == b'IHDR':
+            hdr = struct.unpack('>IIBBBBB', body)
+        elif tag == b'IDAT':
+            idat += body
+        elif tag == b'IEND':
+            break
+        pos += 12 + n
+
+    if hdr is None:
+        raise ValueError('%s has no IHDR' % path)
+    w, h, depth, colour, comp, filt, inter = hdr
+    if (depth, colour, comp, filt, inter) != (8, 2, 0, 0, 0):
+        raise ValueError('%s is bit depth %d, colour type %d, interlace %d; '
+                         'only 8-bit RGB non-interlaced is supported'
+                         % (path, depth, colour, inter))
+
+    raw = zlib.decompress(bytes(idat))
+    stride = w * 3
+    out, prev, p = [], bytearray(stride), 0
+    for _ in range(h):
+        ft = raw[p]
+        p += 1
+        line = bytearray(raw[p:p + stride])
+        p += stride
+        for i in range(stride):
+            a = line[i - 3] if i >= 3 else 0        # left
+            b = prev[i]                             # up
+            c = prev[i - 3] if i >= 3 else 0        # up-left
+            if ft == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif ft == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif ft == 3:
+                line[i] = (line[i] + ((a + b) >> 1)) & 0xFF
+            elif ft == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+            elif ft != 0:
+                raise ValueError('%s uses filter type %d' % (path, ft))
+        out.append([tuple(line[i:i + 3]) for i in range(0, stride, 3)])
+        prev = line
+    return w, h, out
+
+
+def resample(rows, w, h, tw):
+    """Nearest-neighbour width scale; the composite only needs a rough match."""
+    th = max(1, int(round(h * tw / float(w))))
+    return [[rows[min(h - 1, y * h // th)][min(w - 1, x * w // tw)]
+             for x in range(tw)] for y in range(th)]
+
+
+def stamp(date, time):
+    y, m, d = [int(v) for v in date.split('-')]
+    hh, mi = [int(v) for v in time.split(':')]
+    return int((datetime.datetime(y, m, d, hh, mi)
+                - datetime.datetime(1970, 1, 1)).total_seconds())
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--no-badge', action='store_true', help='render without the version badge')
-    ap.add_argument('--no-ble', action='store_true',
-                    help='render the disconnected state (no "B" indicator)')
+    ap = argparse.ArgumentParser(description='render the v14.0 face offline')
+    ap.add_argument('--date', default='2026-09-12', help='YYYY-MM-DD, local')
+    ap.add_argument('--time', default='19:06', help='HH:MM, local')
+    ap.add_argument('--temp', type=int, default=31, help='degrees C as displayed')
+    ap.add_argument('--mv', type=int, default=2905, help='battery mV as displayed')
+    ap.add_argument('--mac', default='A1B2C3', help="the tag's own short address")
+    ap.add_argument('--no-ble', action='store_true', help='disconnected: no rune')
+    ap.add_argument('--debug', help='H,T,B,L counters on row 3 instead of the '
+                                    'calendar, e.g. 18,0,1,2')
+    ap.add_argument('--window', action='store_true',
+                    help='tint the per-minute gate window')
+    ap.add_argument('--compare', metavar='PNG',
+                    help='stack the render under this photograph, scaled to the '
+                         'same width - docs/images/reference-panel.png is the '
+                         'panel the v14.0 layout was measured from')
     ap.add_argument('--zoom', type=int, default=3)
-    ap.add_argument('--with-debug', action='store_true',
-                    help='draw the H/T/B/L counters even though v13.0 ships '
-                         'with EPD_USE_REFRESH_DEBUG 0')
+    ap.add_argument('--tag', default='v14', help='filename tag')
     args = ap.parse_args()
 
-    px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg, dbg_txt) = render(
-        with_badge=not args.no_badge, with_ble=not args.no_ble,
-        with_debug=True if args.with_debug else None)
+    face = Face()
+    L = face.L
+    mac = tuple(int(args.mac[i:i + 2], 16) for i in (0, 2, 4))
+    debug = tuple(int(v) for v in args.debug.split(',')) if args.debug else None
+    t = stamp(args.date, args.time)
+
+    buf = new_buffer(face)
+    hhmm = face.face(buf, L['FACE_W'], L['FACE_H'], t, args.mv, args.temp,
+                     mac=mac, connected=not args.no_ble, debug=debug)
+    rows = bits(face, buf)
+    W, H = L['FACE_W'], L['FACE_H']
+    VIS = L['FACE_VISIBLE_H']
+
+    rows1 = face.row1(t, args.mv, args.temp)
+    print('face: %s %s  %d C  %d mV   partial window %d..%d (%d gates, %.0f%%)'
+          % (args.date, hhmm, args.temp, args.mv, L['EPD_WIN_GATE_FIRST'],
+             L['EPD_WIN_GATE_LAST'], L['EPD_WIN_GATES'], L['EPD_WIN_GATES'] * 100.0 / 296))
+    print('row 1: %s   (%d px, ends at %d of %d)'
+          % (''.join(chr(c) for c in rows1), face.utext_width(rows1),
+             L['ROW1_X'] + face.utext_width(rows1), W))
+    rx, bx = face.row3_rune_x(mac), face.row3_right_x(mac)
+    if debug is None:
+        r3 = face.row3(t)
+        print('row 3: %s   (%d px, ends at %d; rune slot %d..%d; "%s" at %d..%d)'
+              % (''.join(chr(c) for c in r3), face.utext_width(r3),
+                 L['ROW3_X'] + face.utext_width(r3), rx, rx + face.rune_w - 1,
+                 face.mac_bracket(mac), bx,
+                 bx + face.text_width(face.mac_bracket(mac)) - 1))
+    else:
+        print('row 3: counters H%02dT%dB%dL%d   (calendar text suppressed)'
+              % debug)
+    print('clock: slots %s  cell %d px  stroke %d px  height %d px'
+          % ([face.slot_x(i) for i in range(5)], L['CLOCK_CELL_W'],
+             L['CLOCK_STROKE'], L['CLOCK_H']))
+
     os.makedirs(OUTDIR, exist_ok=True)
+    band = (L['EPD_WIN_GATE_FIRST'], L['EPD_WIN_GATE_LAST']) if args.window else None
 
-    tag = 'v10' if args.no_badge else ('v13debug' if use_dbg else 'v13')
-    main_png = os.path.join(OUTDIR, 'screen_%s_zoom%d.png' % (tag, args.zoom))
-    to_image(px, args.zoom).save(main_png)
-    print('wrote %s  (%dx%d)' % (main_png, VDISP_W * args.zoom, GLASS_H * args.zoom))
+    # --- the whole face ---------------------------------------------------
+    c = Canvas(W, VIS)
+    if band:
+        x0 = band[0] - L['EPD_WIN_GATE_OFFSET']
+        x1 = band[1] - L['EPD_WIN_GATE_OFFSET']
+        c.rect(x0, 0, x1, VIS - 1, BAND_FILL)
+    c.ink(rows[:VIS], 0, 0)
+    if band:
+        x0 = band[0] - L['EPD_WIN_GATE_OFFSET']
+        x1 = band[1] - L['EPD_WIN_GATE_OFFSET']
+        c.rect(x0, 0, x1, VIS - 1, BAND_EDGE, edge=True)
+    main_png = os.path.join(OUTDIR, 'screen_%s_zoom%d.png' % (args.tag, args.zoom))
+    c.save(main_png, args.zoom)
+    print('wrote %s  (%dx%d)' % (main_png, W * args.zoom, VIS * args.zoom))
 
-    # right-bottom close-up, so the badge and its spacing can be judged
-    if not args.no_badge:
-        z = 6
-        x0, y0 = 150, 98     # keep the tail of "mV" visible as a reference
-        box = Image.new('RGB', (VDISP_W - x0, VDISP_H - y0), PAPER)
-        bd = ImageDraw.Draw(box)
-        for y in range(y0, VDISP_H):
-            for x in range(x0, VDISP_W):
-                if px[y * VDISP_W + x]:
-                    bd.point((x - x0, y - y0), fill=INK)
-        box = box.resize(((VDISP_W - x0) * z, (VDISP_H - y0) * z), Image.NEAREST)
-        # outline the badge, 4 px outside the box the string occupies
-        bd2 = ImageDraw.Draw(box)
-        bx0 = max(0, (vx - x0) * z - 4)
-        by0 = max(0, (vy - 20 - y0) * z - 4)
-        bx1 = min(box.width - 1, (vx + 52 - x0) * z + 4)
-        by1 = min(box.height - 1, (vy + 2 - y0) * z + 4)
-        bd2.rectangle([bx0, by0, bx1, by1], outline=(200, 30, 40), width=3)
-        zoom_png = os.path.join(OUTDIR, 'badge_zoom%d.png' % z)
-        box.save(zoom_png)
-        print('wrote %s  (%dx%d, red box = badge ink area)'
-              % (zoom_png, box.width, box.height))
+    # --- row 3, right-hand end -------------------------------------------
+    # The rune sits in a slot reserved whether or not anything is connected, so
+    # the calendar text can never reach it; the red box is that slot.
+    x0, y0 = max(0, rx - 24), L['ROW3_Y'] - 2
+    x1, y1 = L['ROW3_RIGHT_X'], L['ROW3_Y'] + 17
+    sub = Canvas(x1 - x0, y1 - y0)
+    sub.ink([r[x0:x1] for r in rows[y0:y1]], 0, 0)
+    sub.rect(rx - x0, L['ROW3_Y'] + 1 - y0, rx + face.rune_w - 1 - x0,
+             L['ROW3_Y'] + face.rune_h - y0, BOX, edge=True)
+    z = 6
+    p = os.path.join(OUTDIR, 'row3_right_zoom%d.png' % z)
+    sub.save(p, z)
+    print('wrote %s  (red box = the rune slot %d..%d%s)'
+          % (p, rx, rx + face.rune_w - 1, '' if not args.no_ble else ', empty'))
 
-    # top-right close-up, so the BLE indicator (and the tail of the model line)
-    # can be told apart at a glance
-    z = 8
-    x0, y0 = 200, 0
-    x1, y1 = VDISP_W, 34
-    box = Image.new('RGB', (x1 - x0, y1 - y0), PAPER)
-    bd = ImageDraw.Draw(box)
-    for y in range(y0, y1):
-        for x in range(x0, x1):
-            if px[y * VDISP_W + x]:
-                bd.point((x - x0, y - y0), fill=INK)
-    box = box.resize(((x1 - x0) * z, (y1 - y0) * z), Image.NEAREST)
-    if not args.no_ble:
-        bd2 = ImageDraw.Draw(box)
-        # v11.0 draws a real bitmap, so the box is exact.  The legacy letter is
-        # still boxed with the old approximation (12 px advance, cap height 12).
-        if use_icon:
-            bx0, by0, bw0, bh0 = bx, by, bw, bh
-        else:
-            bx0, by0, bw0, bh0 = bx, by - 12, 12, 14
-        bd2.rectangle([(bx0 - x0) * z - 4, (by0 - y0) * z - 4,
-                       (bx0 + bw0 - x0) * z + 4, (by0 + bh0 - y0) * z + 4],
-                      outline=(200, 30, 40), width=3)
-    ble_png = os.path.join(OUTDIR, 'ble_ind_zoom%d.png' % z)
-    box.save(ble_png)
-    print('wrote %s  (%dx%d, red box = the BLE indicator)'
-          % (ble_png, box.width, box.height))
+    # --- the clock --------------------------------------------------------
+    x0, y0 = L['CLOCK_X0'] - 4, L['CLOCK_Y'] - 4
+    x1, y1 = L['CLOCK_X0'] + L['CLOCK_WIDEST'] + 4, L['CLOCK_Y'] + L['CLOCK_H'] + 4
+    sub = Canvas(x1 - x0, y1 - y0)
+    sub.ink([r[x0:x1] for r in rows[y0:y1]], 0, 0)
+    p = os.path.join(OUTDIR, 'clock_zoom2.png')
+    sub.save(p, 2)
+    print('wrote %s  (clock %d..%d)' % (p, L['CLOCK_X0'],
+                                        L['CLOCK_X0'] + L['CLOCK_WIDEST'] - 1))
 
-    print('badge at x=%d y=%d  text="%s"' % (vx, vy, ver))
-    if args.no_ble:
-        print('ble indicator: not drawn (disconnected state)')
-    elif use_icon:
-        print('ble rune at x=%d y=%d  %dx%d bitmap'
-              % (bx, by, bw, bh))
-    else:
-        print('ble indicator at x=%d y=%d  legacy letter "B"' % (bx, by))
-    if use_dbg:
-        print('refresh counters at x=%d y=%d  "%s" (boot state)'
-              % (dx, dy, dbg_txt))
-    else:
-        print('refresh counters off the glass (EPD_USE_REFRESH_DEBUG 0); '
-              'would sit at x=%d y=%d as "%s" if re-armed' % (dx, dy, dbg_txt))
+    # --- the reference panel, for the docs --------------------------------
+    # Stacked rather than side by side: the two are the same shape, and the eye
+    # reads the differences down a column far better than across a gap.
+    if args.compare:
+        pw, ph, pix = read_png(args.compare)
+        ref = resample(pix, pw, ph, W * args.zoom)
+        comp = Canvas(W * args.zoom, len(ref) + VIS * args.zoom + 30)
+        comp.blit_rgb(ref, 0, 0)
+        comp.blit_rgb(scale_rgb(bits_rgb(rows, W, VIS), args.zoom),
+                      0, len(ref) + 30)
+        p = os.path.join(OUTDIR, 'reference_vs_%s_zoom%d.png'
+                         % (args.tag, args.zoom))
+        comp.save(p)
+        print('wrote %s  (%dx%d; top = the %dx%d reference, bottom = this render)'
+              % (p, comp.w, comp.h, pw, ph))
     return 0
 
 

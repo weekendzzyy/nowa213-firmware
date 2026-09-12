@@ -17,96 +17,48 @@
 #include "OneBitDisplay.h"
 #include "TIFF_G4.h"
 extern const uint8_t ucMirror[];
-#include "Roboto_Black_80.h"
-#include "font_60.h"
-#include "font16.h"
-#include "font30.h"
 
-// v10.0: firmware-version badge, bottom-right corner.  Same font as the battery
-// line (Dialog_plain_16, baseline y = 120) but right-aligned on the virtual
-// display:  x = 250 - 2 - width(FW_VERSION_STRING).
-// width("v10.0") = 49 px, from the real xAdvance values in font16.h
-// (v=10, 1=11, 0=11, .=6) -> x = 199.  tools/verify_version_badge.py re-derives
-// this from the font metrics and the string in app_config.h, and fails if the
-// three ever disagree, so a longer version cannot silently run off the edge.
-#define EPD_VERSION_X 199
-#define EPD_VERSION_Y 120
+/* v14.0: the face draws every character from one generated Unifont subset, and
+ * the clock from geometry.  Dialog_plain_16, Special_Elite_Regular_30,
+ * DSEG14_Classic_Mini_Regular_40 and Roboto_Black_80 are no longer referenced
+ * by anything, so --gc-sections drops them - that is where most of this
+ * release's flash saving comes from, not from making the face smaller. */
+#include "epd_layout.h"
+#include "epd_font.h"
+#include "calendar.h"
+#include "font_chars.h"
 
-// ---- v11.0: Bluetooth icon instead of the letter "B" -----------------------
-// Set EPD_USE_BLE_ICON to 0 to go back to the plain "B" from BLE_conn_string[].
-#define EPD_USE_BLE_ICON 1
-
-// 7 x 13 px, the classic Bluetooth rune: a vertical stem at x = 3 with two
-// right-pointing chevrons that meet it at the top, the middle and the bottom.
-// Bit n of a row selects the pixel at (x + n).
-//
-//    ...#...      # stem, top
-//    ...##..      diagonal  (3,0)->(6,3)
-//    ...#.#.
-//    ...#..#
-//    ...#.#.      diagonal  (6,3)->(3,6)
-//    ...##..
-//    ...#...      # stem, middle
-//    ...##..      diagonal  (3,6)->(6,9)
-//    ...#.#.
-//    ...#..#
-//    ...#.#.      diagonal  (6,9)->(3,12)
-//    ...##..
-//    ...#...      # stem, bottom
-//
-// Placement is derived from the glyph it replaces, not guessed:
-//   "B" in Dialog_plain_16 at (232, 20) has glyph {w=10, h=12, xo=1, yo=-12},
-//   so its ink covers x 233..242 (centre 237.5) and y 8..19 (centre 13.5).
-// The rune is 7 x 13: x = 234 puts its centre at 237, i.e. within half a pixel
-// of the letter's, and y = 8 seats its bottom row on the baseline the letter
-// used.  tools/verify_ble_icon.py re-derives all of this from font16.h.
-#define BLE_ICON_W 7
-#define BLE_ICON_H 13
-#define BLE_ICON_X 234
-#define BLE_ICON_Y 8
-
-static const uint8_t BLE_ICON_BITS[BLE_ICON_H] = {
-    0x08, 0x18, 0x28, 0x48, 0x28, 0x18, 0x08,
-    0x18, 0x28, 0x48, 0x28, 0x18, 0x08
-};
-
-// The drawing routine itself lives further down, just above epd_display(), so
-// that it sits below the global OBDISP obd that it writes into.
-
-// ---- v12.0: on-glass forensics for the "full refresh every few minutes" bug --
-// Four counters owned by app.c (see the v12.0 block there) are drawn next to
-// the temperature.  H = the hour changed, and one per hour is the DESIGNED full
-// refresh; T = the panel temperature left its dead band; B = the battery
-// voltage left its dead band; L = the BLE connect state flipped.
-//
-// They answered the question.  After nearly a day the glass read H9(saturated)
-// T0 B1 L2: over ~20 hours that is the hourly refresh plus one battery step and
-// one BLE flip, and the temperature dead band has not fired once since v11.0.
-// The "black/white/black every 1-5 minutes" the tag used to do is gone.
-//
-// v13.0: OFF in the release build.  The tally in app.c is deliberately left in
-// place so that re-arming is this one line; it costs a few instructions per
-// full refresh and cannot change WHEN the panel is driven.
-//
-// Geometry (derived, see tools/verify_refresh_debug.py): the temperature "24'C"
-// in Special_Elite_Regular_30 at x=10 has ink x 10..71, so x=84 leaves a clean
-// gap, and the whole string stays inside the per-minute gate window (glass
-// x 54..190) so it is repainted on every tick.
-//
-// The separators went away in v13.0.  H has to survive a whole day and so needs
-// two digits, but that is what it takes to fit the window: "H99T9B9L9" is 99 px
-// and ends at x=183, whereas putting the spaces back makes it 117 px and ends
-// at x=201 - outside the window, where a per-minute refresh would leave it
-// stale.  The letters separate the fields well enough on their own.
+/* ===========================================================================
+ * v14.0 layout - see epd_layout.h for the coordinates and why they are there.
+ *
+ * The three rows follow the reference panel's face:
+ *
+ *   row 1  2026年9月12日 周六 31℃ 2905mV
+ *   row 2        19:06           (seven segments, drawn from geometry)
+ *   row 3  八月初二 11天后秋分        <rune>[A1B2C3]
+ *
+ * Replaced by this release, and why:
+ *   - the "ESL_xxxxxx BWR213" header: the model is reported over BLE and the
+ *     device name is now on the glass in row 3, where it is actually useful;
+ *   - the "Battery 2905mV" line and the v10.0 version badge: the voltage moved
+ *     into row 1, and the face has no free space left for a badge.  Bump and
+ *     read FW_VERSION_STRING from the release tooling instead.
+ *
+ * Diagnostics that changed shape rather than disappeared:
+ *   - EPD_USE_REFRESH_DEBUG now draws its counters in row 3, replacing the
+ *     calendar text.  The counters only move when a full refresh happens, and
+ *     row 3 sits outside the per-minute gate window, so they can never be
+ *     repainted by a partial refresh and lie.  Row 1 and the clock stay
+ *     visible while a tag is being diagnosed, which is the whole point of
+ *     having them on the glass.
+ * ===========================================================================
+ */
 #define EPD_USE_REFRESH_DEBUG 0
-#define EPD_DEBUG_X 84
-#define EPD_DEBUG_Y 95
 
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
 RAM uint8_t epd_update_state = 0;
 
-const char *BLE_conn_string[] = {"", "B"};
 RAM uint8_t epd_temperature_is_read = 0;
 RAM uint8_t epd_temperature = 0;
 
@@ -385,23 +337,107 @@ _attribute_ram_code_ void epd_display_tiff(uint8_t *pData, int iSize)
     EPD_Display(epd_buffer, epd_buffer_size, 1);
 }
 
-// Draw the BLE rune at (x, y).  It goes through obdSetPixel() exactly like the
-// fonts do, so it lands in the same epd_temp buffer that FixBuffer() later
-// converts - no separate pixel format to keep in sync.
-static void epd_draw_ble_icon(int x, int y)
+/* ===========================================================================
+ * The face itself.
+ *
+ * Plain flash-resident code, called from the RAM-resident epd_display().  The
+ * comma-separated append helpers build each row as codepoints first and draw
+ * it in one call, so a row is one string to measure - which is what lets
+ * tools/verify_v14_layout.py reproduce the exact width from the same data.
+ * ===========================================================================
+ */
+extern uint8_t mac_public[6];
+
+static int put_num(uint16_t *dst, int n, int v)
 {
-    int row, col;
-    for (row = 0; row < BLE_ICON_H; row++)
+    char b[12];
+    int k = 0, i;
+
+    if (v < 0)
     {
-        for (col = 0; col < BLE_ICON_W; col++)
-        {
-            if (BLE_ICON_BITS[row] & (1 << col))
-                obdSetPixel(&obd, x + col, y + row, 1, 1);
-        }
+        dst[n++] = '-';
+        v = -v;
     }
+    if (v == 0)
+        b[k++] = '0';
+    while (v)
+    {
+        b[k++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    for (i = k - 1; i >= 0; i--)
+        dst[n++] = (uint16_t)(unsigned char)b[i];
+    return n;
 }
 
-extern uint8_t mac_public[6];
+static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
+                     int16_t temperature)
+{
+    /* Sized from epd_layout.h: the widest string the clamps below can produce
+     * is 26 codepoints.  It was 24, and the widest real string overran it by
+     * three uint16_t into the caller's stack frame. */
+    uint16_t r1[ROW1_MAX_CHARS], r3[CAL_ROW3_MAX];
+    char b[20];
+    int n, x, y, m, d, wd;
+
+    /* Clamp to what the hardware can produce, so the composed line cannot grow
+     * past the width epd_layout.h reserved for it.  See the row-1 block there
+     * for why these bounds are the honest ones. */
+    if (mv > ROW1_MV_MAX)
+        mv = ROW1_MV_MAX;
+    if (temperature < ROW1_TEMP_MIN)
+        temperature = ROW1_TEMP_MIN;
+    else if (temperature > ROW1_TEMP_MAX)
+        temperature = ROW1_TEMP_MAX;
+
+    /* ---- row 1: 2026年9月12日 周六 31℃ 2905mV ---- */
+    cal_date(t, &y, &m, &d, &wd);
+    n = 0;
+    n = put_num(r1, n, y);
+    r1[n++] = UF_C_YEAR;
+    n = put_num(r1, n, m);
+    r1[n++] = UF_C_MONTH;
+    n = put_num(r1, n, d);
+    r1[n++] = UF_C_DAY;
+    r1[n++] = ' ';
+    r1[n++] = UF_C_WEEK;
+    r1[n++] = UF_WEEKDAY[wd];
+    r1[n++] = ' ';
+    n = put_num(r1, n, temperature);
+    r1[n++] = UF_C_DEGC;
+    r1[n++] = ' ';
+    n = put_num(r1, n, mv);
+    r1[n++] = 'm';
+    r1[n++] = 'V';
+    r1[n] = 0;
+    epd_utext(scr, wp, ht, ROW1_X, ROW1_Y, r1);
+
+    /* ---- row 2: the clock ---- */
+    sprintf(b, "%02d:%02d", (int)((t / 60) / 60) % 24, (int)(t / 60) % 60);
+    epd_clock(scr, wp, ht, b);
+
+    /* ---- row 3 left: 八月初二 11天后秋分 ---- */
+#if EPD_USE_REFRESH_DEBUG
+    /* v12.0 forensics, moved here in v14.0: see the block comment at the top
+     * of this file for why row 3 and not next to the temperature. */
+    sprintf(b, "H%02dT%dB%dL%d", dbg_hour, dbg_temp, dbg_batt, dbg_ble);
+    epd_text(scr, wp, ht, ROW3_X, ROW3_Y, b);
+#else
+    if (cal_row3(t, r3, CAL_ROW3_MAX) > 0)
+        epd_utext(scr, wp, ht, ROW3_X, ROW3_Y, r3);
+#endif
+
+    /* ---- row 3 right: the rune (only while connected) and the device name.
+     * The name is the string the tag advertises, so what is on the glass is
+     * what a scanner shows; the rune is drawn to the left of it and its slot
+     * is left empty when nothing is connected. ---- */
+    sprintf(b, "[%02X%02X%02X]", mac_public[2], mac_public[1], mac_public[0]);
+    x = ROW3_RIGHT_X - epd_text_width(b);
+    epd_text(scr, wp, ht, x, ROW3_Y, b);
+    if (ble_get_connected())
+        epd_rune(scr, wp, ht, x - RUNE_GAP - EPD_RUNE_W, ROW3_Y + 1);
+}
+
 _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial)
 {
     if (epd_update_state)
@@ -447,31 +483,10 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     obdCreateVirtualDisplay(&obd, resolution_w, resolution_h, epd_temp);
     obdFill(&obd, 0, 0); // fill with white
 
-    char buff[100];
-    sprintf(buff, "ESL_%02X%02X%02X %s", mac_public[2], mac_public[1], mac_public[0], epd_model_string[epd_model]);
-    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 1, 17, (char *)buff, 1);
-#if EPD_USE_BLE_ICON
-    // v11.0: a Bluetooth rune instead of the letter "B".  Drawn only while a
-    // central is connected, exactly like the letter it replaces.
-    if (ble_get_connected())
-        epd_draw_ble_icon(BLE_ICON_X, BLE_ICON_Y);
-#else
-    sprintf(buff, "%s", BLE_conn_string[ble_get_connected()]);
-    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 232, 20, (char *)buff, 1);
-#endif
-    sprintf(buff, "%02d:%02d", ((time_is / 60) / 60) % 24, (time_is / 60) % 60);
-    obdWriteStringCustom(&obd, (GFXfont *)&DSEG14_Classic_Mini_Regular_40, 50, 65, (char *)buff, 1);
-    sprintf(buff, "%d'C", EPD_read_temp());
-    obdWriteStringCustom(&obd, (GFXfont *)&Special_Elite_Regular_30, 10, 95, (char *)buff, 1);
-#if EPD_USE_REFRESH_DEBUG
-    // v12.0: why the full refreshes are happening - see the define above.
-    sprintf(buff, "H%02dT%dB%dL%d", dbg_hour, dbg_temp, dbg_batt, dbg_ble);
-    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, EPD_DEBUG_X, EPD_DEBUG_Y, (char *)buff, 1);
-#endif
-    sprintf(buff, "Battery %dmV", battery_mv);
-    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 10, 120, (char *)buff, 1);
-    sprintf(buff, "%s", FW_VERSION_STRING);
-    obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, EPD_VERSION_X, EPD_VERSION_Y, (char *)buff, 1);
+    /* The face is drawn from a plain function so that the RAM copy of this one
+     * stays small - SRAM is the scarcest resource in this build. */
+    epd_face(obd.ucScreen, resolution_w, resolution_h, time_is, battery_mv, temperature);
+
     FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
     EPD_Display(epd_buffer, resolution_w * resolution_h / 8, full_or_partial);
 }

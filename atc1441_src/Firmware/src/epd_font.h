@@ -1,0 +1,48 @@
+#pragma once
+
+#include <stdint.h>
+
+/* ===========================================================================
+ * The v14.0 drawing layer.
+ *
+ * Everything here writes into the OneBitDisplay virtual screen - the buffer
+ * obdCreateVirtualDisplay() was handed - and nothing else.  That buffer is
+ * stored one byte per column per eight rows, with bit (y & 7) inside the byte:
+ *
+ *     byte at   (y >> 3) * wpitch + x
+ *     bit       (y & 7)                    set = ink (black)
+ *
+ * so a glyph blit is two byte-ORs per column.  The functions below are plain
+ * flash-resident code on purpose: epd_display() runs from RAM (it is
+ * _attribute_ram_code_), and the SRAM it costs is the scarcest resource in
+ * this build.  Keeping the drawing out of it costs nothing at runtime.
+ *
+ * ytop may be any row, not just a multiple of 8 - the blitter shifts.
+ * ===========================================================================
+ */
+
+/* Draw one Unicode codepoint.  Returns the pen x after it, so calls chain. */
+int epd_glyph(uint8_t *scr, int wpitch, int height, int x, int ytop, uint32_t cp);
+
+/* Draw a NUL-terminated ASCII string.  Returns the pen x. */
+int epd_text(uint8_t *scr, int wpitch, int height, int x, int ytop, const char *s);
+
+/* Draw a NUL-terminated array of codepoints (Chinese).  Returns the pen x. */
+int epd_utext(uint8_t *scr, int wpitch, int height, int x, int ytop,
+              const uint16_t *s);
+
+/* Advance widths, for right-aligning without drawing. */
+int epd_text_width(const char *s);
+int epd_utext_width(const uint16_t *s);
+
+/* The Bluetooth rune, drawn at (x, ytop).  The size is part of the interface
+ * because callers lay the device name out around it; epd_font.c checks these
+ * against the generated bitmap at compile time, so the two cannot drift. */
+#define EPD_RUNE_W 8
+#define EPD_RUNE_H 13
+void epd_rune(uint8_t *scr, int wpitch, int height, int x, int ytop);
+
+/* The seven-segment clock in the row-2 band.  `hhmm` is "HH:MM"; the five
+ * slots have fixed x positions, so a '1' never moves its neighbours - which is
+ * what lets the per-minute refresh drive only the last two slots. */
+void epd_clock(uint8_t *scr, int wpitch, int height, const char *hhmm);

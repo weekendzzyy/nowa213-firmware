@@ -43,6 +43,25 @@ RAM uint8_t  last_ble_shown  = 0xFF;   // last displayed BLE-connected state
 RAM int16_t  last_temp_shown = 0x7FFF; // last displayed panel temperature (degC)
 RAM uint16_t last_batt_shown = 0xFFFF; // last displayed battery voltage (mV)
 
+// ---- v14.0: the glass gets a snapshot, not the live reading ------------------
+// The partial window is a BAND of glass columns, not a rectangle: SSD1680 drives
+// gate lines, so every row inside the band is rewritten.  v14.0's band is
+// x 140..231, and row 1's temperature and voltage land inside it.  Handing
+// epd_display() the live values would therefore have two costs, both fatal to
+// the point of the window:
+//   * the ADC's last digit wobbles by a millivolt or two, so row 1 would differ
+//     from the glass on nearly every tick and be repainted every minute - the
+//     saving the smaller window buys, spent again on a digit nobody is reading;
+//   * a value that changes the string's WIDTH (9 -> 10 degC, 999 -> 1000 mV)
+//     would slide the rest of the row sideways, and only the part inside the
+//     band would be repainted - the glass would show the tail of the new string
+//     over the tail of the old one until the next hourly refresh.
+// So the displayed values are frozen between full refreshes: they are what is
+// on the glass, which is what last_*_shown already means.  The temperature and
+// battery still update on every full refresh (hourly, or on the dead bands).
+RAM uint16_t shown_mv  = 0xFFFF;       // value currently ON the glass
+RAM int16_t  shown_temp = 0;
+
 // ---- v12.0: full-refresh forensics (temporary) ------------------------------
 // The tag was reported to flash the WHOLE panel through black/white/black every
 // 1-4 minutes at a random interval.  `full` below can only be raised by four
@@ -238,7 +257,17 @@ _attribute_ram_code_ void main_loop(void)
 
         if (paint)
         {
-            epd_display(get_time(), battery_mv, temperature, full);
+            // v14.0: freeze the displayed values until the next full refresh -
+            // see the "snapshot" block above.  `full` is known before the call,
+            // so the snapshot is taken on exactly the ticks that repaint the
+            // whole panel.
+            if (full)
+            {
+                shown_mv = battery_mv;
+                shown_temp = temperature;
+            }
+
+            epd_display(get_time(), shown_mv, shown_temp, full);
             first_refresh_done = 1;
         }
     }

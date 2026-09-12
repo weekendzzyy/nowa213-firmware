@@ -48,19 +48,26 @@ nowa213/
 │   └── build_firmware.py     # 无 make 也能编译的脚本（复刻 makefile）
 ├── TlsrComSwireWriter/       # pvvx 刷机工具 + 各版本救砖 .bin
 ├── firmware_releases/        # ★发布固件（文件名带版本/日期/大小）
-├── docs/                     # 研究笔记与接线速查
+├── docs/                     # 研究笔记、接线速查、版面推导
 │   ├── nowa213_flash_research.md
 │   ├── nowa213_wiring_flash_summary.md
+│   ├── v14-reference-design.md   # 版面推导 + 预测与交付的对账
 │   └── images/               # 文档配图（唯一入库的渲染图）
-├── tools/                    # 全部脚本：图片工具 + 离线校验 + 屏幕预览
+├── tools/                    # 全部脚本：版面镜像 + 离线校验 + 屏幕预览 + 表生成
+│   ├── epd_face_model.py     # ★版面唯一镜像（解析源码，不硬编码常量）
+│   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
+│   │                            #   --window 画窗口底纹 / --compare <照片> 对照参考面板
+│   │                            #   --debug 18,0,1,2 连诊断计数器一起画
+│   ├── verify_v14_layout.py  # ★64 项断言（含否定性自检）
+│   ├── gen_v14_tables.py     # 生成字体 / 历法 / 符文表
+│   ├── verify_part_lut.py    # LUT 布局断言
+│   ├── verify_time_catchup.py# 时钟追补断言
 │   ├── epd_image_tool.py     # BMP → 帧缓冲 → 可选直写 Flash
 │   ├── gen_epd_image.py      # 生成 EPD 测试图（250×122 纯黑等）
 │   ├── bmp2epd_framebuffer.py# BMP → 帧缓冲 + BLE 指令序列
 │   ├── gen_test_image.py     # 非对称测试图（验方向 / 裁切）
 │   ├── list_ports.py         # 枚举 COM 口
-│   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
-│   │                            #   --with-debug 连诊断计数器一起画出来
-│   └── verify_*.py           # 7 个几何 / 协议断言脚本（动过驱动或 UI 就全跑）
+│   └── archive/              # 已退役的校验脚本（附退役原因，别照着跑）
 ├── web_flasher.html          # 浏览器 WebBLE 刷机
 └── web_uploader.html         # 浏览器 WebBLE 传图 + 对时
 ```
@@ -80,7 +87,7 @@ nowa213/
 ```powershell
 cd atc1441_src/Firmware
 python build_firmware.py
-# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v13.0 实测 91260 字节）
+# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v14.0 实测 82460 字节）
 ```
 
 ### ⚠️ 编译后必须做 SRAM 自检
@@ -91,7 +98,7 @@ TLSR8359 只有 **64KB SRAM**，栈顶固定在 `0x850000`。`boot.link` **无�
 ```powershell
 cd atc1441_src/Firmware
 ./tc32_windows/bin/tc32-elf-nm.exe out/ATC_Paper.elf | grep _end_bss_
-# 必须 < 0x850000（v13.0 实测 0x84efb1，余量 ~4.1KB）
+# 必须 < 0x850000（v14.0 实测 0x84efa1，余量 4191 字节）
 ```
 
 **加任何全局/静态大数组前，先算 SRAM 占用。** 用户图当初用 5KB RAM 缓冲即踩此坑，
@@ -153,14 +160,16 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 
 | 想改什么 | 去哪 | 关键约束 |
 |---|---|---|
-| 屏幕排版 / 加字段 | `epd.c` → `epd_display()` | **先跑 `tools/render_screen_preview.py`** 离线看效果，别为几个像素来回刷机；底部 6 行不可见 |
+| 屏幕排版 / 加字段 | **`epd_layout.h`（坐标唯一真源）** + `epd.c` → `epd_display()` / `epd_font.c` | **先跑 `tools/verify_v14_layout.py` 与 `tools/render_screen_preview.py`** 离线看效果，别为几个像素来回刷机；底部 6 行不可见；改完栅格要同步重测局部窗口 |
 | 刷新策略（何时全刷） | `app.c` → `main_loop()` | 只有「分钟变→局部刷」「小时变→全刷」「`force_full`→全刷」三条路，**没有 N 分钟周期** |
-| 局部刷新窗口（省电） | `epd_bwr_213.c` 的 `0x01` / `0x0F` 写入处 | ★本机跑的是这个文件，不是 `epd_bw_213.c` |
+| 局部刷新窗口（省电） | `epd_layout.h` 的 `EPD_WIN_GATE_*` + `epd_bwr_213.c` 的 `0x01` / `0x0F` 写入处 | ★本机跑的是这个文件，不是 `epd_bw_213.c`。窗口由**时钟槽位**推导，不要手写数字 —— `verify_v14_layout.py` 会精确比对窗口与「枚举 1440 个 HH:MM 逐拍 diff」的并集 |
+| 局部刷新期间显示的值 | `app.c` 的 `shown_mv` / `shown_temp` 快照 | 窗口是**竖直带**，带内所有行都会被重写。行 1 的电压落在带内，所以必须给快照值，否则末位漂移被每分钟重绘 |
 | 时钟走时 | `time.c` → `handler_time()` | 必须用 `while` 追补，**主循环频率不可假设** |
 | 电量换算 | `battery.c` → `get_battery_level()` | 测的是芯片 VDD，不是电池节点；窗口 2200→3100 mV |
 | BLE 指令 | `epd_ble_service.c` | opcode `0x00 <fill>` = memset 缓冲，`0x01` = 推送到屏 |
-| 版本号 | `app_config.h` → `FW_VERSION_STRING` | 改了要同步 `epd.c` 的 `EPD_VERSION_X`（右对齐，`verify_version_badge.py` 会抓） |
-| 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v13.0 起出厂关闭（`0`）。计数逻辑**保留**，改回 `1` 重新编译即重新武装。**别把 `H` 的上限调回 9** —— 一天 18 次整点必然撞顶，`verify_refresh_debug.py` 会直接 FAIL |
+| 版本号 | `app_config.h` → `FW_VERSION_STRING` | ⚠ **v14.0 起屏上不再显示版本号**：行 3 右下改画设备广播名（照参考面板）。版本号改完跟着 git tag 和归档文件名走即可 |
+| 字体 / 历法 / 符文表 | `tools/gen_v14_tables.py`（**不要手改 `font_unifont.h` / `font_chars.h` / `calendar_data.h`**）| 生成器会把编译进去的位图打进头文件注释，改完重跑生成器 + 验证器 |
+| 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v13.0 起出厂关闭（`0`）。计数逻辑**保留**，改回 `1` 重新编译即重新武装；v14.0 起计数器改画在**行 3**（替换农历文字），因此永远不会被局部刷新抹掉。**别把 `H` 的上限调回 9** —— 一天 18 次整点必然撞顶 |
 
 > ⚠️ **改任何驱动代码前，先确认哪个文件在跑。** 屏幕左上角自报 `ESL_xxxxxx BWR213`
 > ⇒ `epd_model == 2` ⇒ 执行 `epd_bwr_213.c`（SSD1680 族）。`epd_bw_213.c`
@@ -259,7 +268,7 @@ git tag -a v2.1 -m "..."
 | **改了驱动但行为没变** | 改到了兜底驱动 `epd_bw_213.c`，本机不执行 | 先读屏幕型号串确认 `epd_model`，改 `epd_bwr_213.c`（v6.0 踩过）|
 | **时钟走时偏慢** | `handler_time()` 用 `if`，每次调用最多 +1 秒，速率被主循环频率钳制 | 改 `while` 追补（v9.0）；主循环每圈都会睡，别假设调用频率 |
 | **每隔几分钟整屏闪、间隔还不固定** | 拿传感器读数做 `!=` 比较去触发全刷；温度 1℃ 量化，室温落在两步之间时会来回跳 | **已结案**：加死区（v11.0）即为正解，实测一天 `T=0`、全刷从 ~500 次降到 ~21 次（v13.0）。查不动时把各触发源计数器画到屏上定位（v12.0），别在纸面上继续推演 |
-| **屏上诊断计数器只显示一位、很快就顶格** | 计数上限按"版面能放几位"倒推，而非按"事件在观察窗口内的预期次数" | 上限要够撑过整个观察期（`H` 一天 18 次 ⇒ 需两位）；`verify_refresh_debug.py` 已加断言拦住这个错 |
+| **屏上诊断计数器只显示一位、很快就顶格** | 计数上限按"版面能放几位"倒推，而非按"事件在观察窗口内的预期次数" | 上限要够撑过整个观察期（`H` 一天 18 次 ⇒ 需两位，故 `DBG_BUMP_H` 上限 99、其余 `DBG_BUMP` 上限 9）；`tools/archive/verify_refresh_debug.py` 曾断言此事，v14.0 起由 `verify_v14_layout.py` 的「计数器避开每分钟窗口带」接手 |
 | **反汇编搜不到某全局变量的地址** | TC32 用「基址寄存器 + 小偏移」寻址，只有基址进字面量池 | `nm` 取地址 → 找基址字面量 → 按差值反推偏移；直接 grep 全地址会**假阴性** |
 
 ---
