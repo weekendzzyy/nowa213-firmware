@@ -113,7 +113,7 @@ nowa213/
 
 ```bash
 # 0) 改版面/改 UI 之前，先让离线校验器说话（不需要工具链）
-python tools/verify_v14_layout.py        # 期望 "64 checks passed, 0 failed"
+python tools/verify_v14_layout.py        # 期望 "66 checks passed, 0 failed"
 python tools/render_screen_preview.py    # 期望 previews/screen_v14_zoom3.png
 
 # 1) 编译（需先备好 tc32 工具链，见 DEVELOPMENT.md §1.2）
@@ -141,7 +141,7 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 |---|---|
 | `epd_face_model.py` | **版面唯一镜像**：逐行对应 `epd_font.c` / `epd.c` / `calendar.c`，解析 `epd_layout.h` 的宏与生成的字体/历法表。预览与校验都跑在它上面，所以两者不可能各自漂移 |
 | `render_screen_preview.py` | **改 UI 前先跑它**：离线渲染整屏 PNG。`--window` 加窗口底纹，`--compare <照片>` 与参考面板对照，`--debug H,T,B,L` 画诊断计数器 |
-| `verify_v14_layout.py` | 64 项断言：格子边界、窗口=实际变化列的精确并集（枚举全部 1440 个 HH:MM 逐拍 diff）、行 1 最宽串、农历 9131 天逐日走查、以及**否定性自检**（把每个已修 bug 重新植入，确认对应断言真的会 FAIL）|
+| `verify_v14_layout.py` | 66 项断言：格子边界、窗口=实际变化列的精确并集（枚举全部 1440 个 HH:MM 逐拍 diff）、行 1 最宽串、农历 9131 天逐日走查、以及**否定性自检**（把每个已修 bug 重新植入，确认对应断言真的会 FAIL）|
 | `gen_v14_tables.py` | 生成 `font_unifont.h` / `font_chars.h` / `calendar_data.h`（Unifont 子集 + 节气 Meeus + 农历表 + 手绘符文），并把编译进去的位图打进头文件注释 |
 | `verify_part_lut.py` | 断言 153 字节 LUT 布局 |
 | `verify_time_catchup.py` | 断言时钟追补逻辑（含 268 秒回绕边界）|

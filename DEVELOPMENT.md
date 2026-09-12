@@ -58,7 +58,7 @@ nowa213/
 │   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
 │   │                            #   --window 画窗口底纹 / --compare <照片> 对照参考面板
 │   │                            #   --debug 18,0,1,2 连诊断计数器一起画
-│   ├── verify_v14_layout.py  # ★64 项断言（含否定性自检）
+│   ├── verify_v14_layout.py  # ★66 项断言（含否定性自检）
 │   ├── gen_v14_tables.py     # 生成字体 / 历法 / 符文表
 │   ├── verify_part_lut.py    # LUT 布局断言
 │   ├── verify_time_catchup.py# 时钟追补断言
