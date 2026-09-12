@@ -414,7 +414,8 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
      * only thing that can give is the space before the temperature: drop it
      * when the left part would run into the voltage. */
     sprintf(b, "%umV", mv);
-    x = ROW1_RIGHT_X - epd_text_width(b);
+    /* aligned by INK: the last glyph's right bearing is part of the edge */
+    x = ROW1_RIGHT_X - epd_text_width(b) + epd_text_rb(b);
     if (ROW1_X + epd_utext_width(r1) > x)
     {
         memmove(&r1[sp], &r1[sp + 1], (n - sp) * sizeof r1[0]);
@@ -455,7 +456,9 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
         sprintf(b, "%s", FW_VERSION_STRING);
     else
         sprintf(b, "[%02X%02X]", mac_public[1], mac_public[0]);
-    x = ROW3_RIGHT_X - epd_text_width(b) + 1;
+    /* aligned by INK - the old hard-coded "+ 1" happened to fit the version's
+     * trailing digit but left the name's ']' floating 3 px further left */
+    x = ROW3_RIGHT_X - epd_text_width(b) + epd_text_rb(b);
     epd_text(scr, wp, ht, x, ROW3_Y, b);
     if (ble_get_connected())
         epd_rune(scr, wp, ht, ROW3_RUNE_X, ROW3_Y + 1);

@@ -255,14 +255,16 @@ def main():
         else face.row3_version()
     if debug is None:
         r3 = face.row3(t)
-        print('row 3: %s   (%d px, ends at %d; rune slot %d..%d; "%s" at %d..%d)'
+        print('row 3: %s   (%d px, ends at %d; rune slot %d..%d; "%s" at %d..%d, ink ends %d)'
               % (''.join(chr(c) for c in r3), face.utext_width(r3),
                  L['ROW3_X'] + face.utext_width(r3), rx, rx + face.rune_w - 1,
-                 shown, bx, bx + face.text_width(shown) - 1))
+                 shown, bx, bx + face.text_width(shown) - 1,
+                 bx + face.text_width(shown) - 1 - face.text_rb(shown)))
         ox = face.row3_right_x(other)
-        print('       the other half of the swap, "%s", is %d px at %d..%d'
+        print('       the other half of the swap, "%s", is %d px at %d..%d, ink ends %d'
               % (other, face.text_width(other), ox,
-                 ox + face.text_width(other) - 1))
+                 ox + face.text_width(other) - 1, face.text_rb(other) and
+                 ox + face.text_width(other) - 1 - face.text_rb(other)))
     else:
         print('row 3: counters H%02dT%dB%dL%d   (calendar text suppressed)'
               % debug)

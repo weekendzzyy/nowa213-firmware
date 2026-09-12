@@ -9,14 +9,14 @@
 > ⚠️ **个人研究项目，非汉朔官方固件。** 刷机可能变砖。动手前请先读
 > [DEVELOPMENT.md](DEVELOPMENT.md)，尤其是「烧录后必须整根拔 USB」那节。
 
-![屏幕预览](docs/images/screen-v14.3.png)
+![屏幕预览](docs/images/screen-v14.4.png)
 
 *上图由 `tools/render_screen_preview.py` 离线渲染（250×122，3 倍放大），不依赖实机 ——
 改 UI 的第一步就跑它，别为几个像素来回刷机。*
 
 同一张图的实际排布与它模仿的面板放在一起：
 
-![参考面板与实现对照](docs/images/reference-vs-v14.3.png)
+![参考面板与实现对照](docs/images/reference-vs-v14.4.png)
 
 *上：参考面板（`docs/images/reference-panel.png`，用户提供）；下：本固件渲染。
 对照图由 `python tools/render_screen_preview.py --compare docs/images/reference-panel.png`
@@ -38,7 +38,7 @@
 
 ## 版本状态
 
-当前 **v14.3**。完整历史与每个发布固件的 SHA256 见 [CHANGELOG.md](CHANGELOG.md)。
+当前 **v14.4**。完整历史与每个发布固件的 SHA256 见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 版本 | 日期 | 内容 |
 |:--|:--|:--|
@@ -58,6 +58,7 @@
 | **v14.1** | **09-12** | 右下角**广播名 / 版本号每 5 分钟交替**；名字照参考图缩成 4 位十六进制并收进局部刷新带内 |
 | **v14.2** | **09-12** | 大时钟换回 **DSEG14 数码管字体**（放大 1.5 倍，60 px）；**修温度显示恒 85 ℃**（读错了传感器） |
 | **v14.3** | **09-12** | 数字 **1/4 拉满高**（字体原装偏矮 6 px）；**电压右对齐** 231，与广播名/版本号同一条右边缘 |
+| **v14.4** | **09-12** | 右对齐改为**按墨迹**而非按笔位——`]` 字形右边空 4px，肉眼看三个串差 1~4px；现三串墨迹边缘同列 |
 
 > **问题的结局**：v11.0 的温度死区就是真正的修复。诊断版运行近一天读数
 > `H9(饱和) T0 B1 L2` —— 温度一次都没越过死区，一天只剩约 21 次全刷（此前约 500 次）。
@@ -66,7 +67,7 @@
 > 把 `epd.c` 的 `EPD_USE_REFRESH_DEBUG` 改成 `1` 重新编译即可，无需重写。
 > 离线预览可用 `python tools/render_screen_preview.py --debug 18,0,1,2` 直接看排版。
 
-### v14.3 版面
+### v14.4 版面
 
 ```
 ┌──────────────────────────────────────────┐
@@ -74,12 +75,12 @@
 │                                          │
 │        19:06                 ← DSEG14  │  行2 高 60 px
 │                                          │
-│ 八月初二 11天后秋分  ⚡ [B2A1] / v14.3  │  行3 符文槽 172..179（固定）
+│ 八月初二 11天后秋分  ⚡ [B2A1] / v14.4  │  行3 符文槽 172..179（固定）
 └──────────────────────────────────────────┘
        ↑ 局部刷新窗口 玻璃 x 140..231 = 栅极 187..278（92/296 = 31%）
 ```
 
-行 3 右下角在**广播名 `[B2A1]` 与版本号 `v14.3` 之间每 5 分钟交替**（`ROW3_ALT_SECS`）；
+行 3 右下角在**广播名 `[B2A1]` 与版本号 `v14.4` 之间每 5 分钟交替**（`ROW3_ALT_SECS`）；
 行 1 的**电压**与它们右对齐到同一条边（`ROW1_RIGHT_X` = `ROW3_RIGHT_X` = 231）。
 两个设计决定值得说明：
 
@@ -131,7 +132,7 @@ nowa213/
 
 ```bash
 # 0) 改版面/改 UI 之前，先让离线校验器说话（不需要工具链）
-python tools/verify_v14_layout.py        # 期望 "79 checks passed, 0 failed"
+python tools/verify_v14_layout.py        # 期望 "81 checks passed, 0 failed"
 python tools/render_screen_preview.py    # 期望 previews/screen_v14_zoom3.png
 
 # 1) 编译（需先备好 tc32 工具链，见 DEVELOPMENT.md §1.2）
@@ -159,7 +160,7 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 |---|---|
 | `epd_face_model.py` | **版面唯一镜像**：逐行对应 `epd_font.c` / `epd.c` / `calendar.c`，解析 `epd_layout.h` 的宏与生成的字体/历法表。预览与校验都跑在它上面，所以两者不可能各自漂移 |
 | `render_screen_preview.py` | **改 UI 前先跑它**：离线渲染整屏 PNG。`--window` 加窗口底纹，`--compare <照片>` 与参考面板对照，`--debug H,T,B,L` 画诊断计数器 |
-| `verify_v14_layout.py` | 79 项断言：格子边界、窗口=实际变化列的精确并集（枚举全部 1440 个 HH:MM 逐拍 diff）、行 1 最宽串、农历 9131 天逐日走查、以及**否定性自检**（把每个已修 bug 重新植入，确认对应断言真的会 FAIL）|
+| `verify_v14_layout.py` | 81 项断言：格子边界、窗口=实际变化列的精确并集（枚举全部 1440 个 HH:MM 逐拍 diff）、行 1 最宽串、农历 9131 天逐日走查、以及**否定性自检**（把每个已修 bug 重新植入，确认对应断言真的会 FAIL）|
 | `gen_v14_tables.py` | 生成 `font_unifont.h` / `font_chars.h` / `calendar_data.h`（Unifont 子集 + 节气 Meeus + 农历表 + 手绘符文），并把编译进去的位图打进头文件注释 |
 | `verify_part_lut.py` | 断言 153 字节 LUT 布局 |
 | `verify_time_catchup.py` | 断言时钟追补逻辑（含 268 秒回绕边界）|

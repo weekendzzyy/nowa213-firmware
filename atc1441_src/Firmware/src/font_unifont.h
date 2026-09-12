@@ -55,6 +55,18 @@ static const unsigned char UF_ADV[UF_GLYPH_COUNT] = {
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
     16, 16, 16, 16, 16, 16, 16,};
+/* ink right bearing of each glyph: advance - 1 - last ink column.  A string
+ * right aligned BY PEN ends at a column that depends on its last glyph's
+ * shape (the ']' stops 4 px short of 'V'); adding the last glyph's bearing
+ * aligns the INK, which is what the eye compares. */
+static const unsigned char UF_RB[UF_GLYPH_COUNT] = {
+    5, 2, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
+    1, 4, 0, 0, 1, 1, 1, 2, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 2, 1, 1, 3, 2, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 4, 2, 1, 1, 3,
+    1, 1, 1, 1, 3, 1, 2, 1, 1, 1, 1, 2,
+    1, 2, 1, 1, 1, 1, 1,};
 static const unsigned char UF_BITS[UF_GLYPH_BYTES] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02,

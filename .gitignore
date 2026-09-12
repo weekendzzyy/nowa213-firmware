@@ -39,8 +39,8 @@ epd_preview/
 # The images the docs actually reference are tracked under docs/images/ so the
 # docs never depend on a build artefact:
 #   screen-v13.0.png        the face v13.0 shipped (kept for comparison)
-#   screen-v14.3.png        the current face
-#   reference-vs-v14.3.png  the current face under the reference panel
+#   screen-v14.4.png        the current face
+#   reference-vs-v14.4.png  the current face under the reference panel
 #   reference-panel.png     the photograph the v14.0 layout was measured from
 previews/
 

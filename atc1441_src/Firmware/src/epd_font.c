@@ -120,6 +120,30 @@ int epd_text_width(const char *s)
     return w;
 }
 
+/* The ink right bearing of a string's LAST glyph: how many px its ink stops
+ * short of the pen edge.  Right alignment by advance alone leaves this on the
+ * glass - "[B2A1]" floats 4 px left of "2766mV" - so callers right aligning by
+ * INK add this to the x they compute from epd_text_width.  0 for a glyph the
+ * subset does not carry (its fallback fills its advance). */
+int epd_text_rb(const char *s)
+{
+    const char *e = s;
+    int cols, adv, c;
+    const unsigned char *blob;
+
+    while (*e)
+        e++;
+    if (e == s)
+        return 0;
+    blob = uf_find((uint32_t)(unsigned char)e[-1], &cols, &adv);
+    if (!blob)
+        return 0;
+    for (c = cols - 1; c >= 0; c--)
+        if (blob[2 * c] | blob[2 * c + 1])
+            return adv - 1 - c;
+    return 0;
+}
+
 int epd_utext_width(const uint16_t *s)
 {
     int w = 0, cols, adv;

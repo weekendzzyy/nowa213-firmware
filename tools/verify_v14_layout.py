@@ -389,22 +389,41 @@ def check_row1(face, rep):
             'measured %d, declared %d' % (worst_cp, L['ROW1_MAX_CHARS'] - 1))
     rep.note('widest: %s  (%d px)' % (worst[1], worst[0]))
 
-    # the voltage is right aligned on ROW1_RIGHT_X, the SAME edge as row 3's
-    # name/version - that alignment is the whole point of this layout change
-    ok = all(face.row1_mv_x(mv) + face.text_width('%dmV' % min(mv, L['ROW1_MV_MAX']))
-             == L['ROW1_RIGHT_X'] for mv in mvs)
-    rep.chk(ok and L['ROW1_RIGHT_X'] == L['ROW3_RIGHT_X'],
-            "the voltage shares row 3's right edge, for every reading",
-            'ROW1_RIGHT_X %d, ROW3_RIGHT_X %d'
-            % (L['ROW1_RIGHT_X'], L['ROW3_RIGHT_X']))
+    # The whole point of this layout: one right EDGE, judged by INK, not by
+    # pen.  A pen-aligned ']' stops 4 px short of a pen-aligned 'V', which the
+    # user could see - so this renders the exact strings the face draws, at the
+    # exact x the face draws them at, and compares the ink.
+    W, H = L['FACE_W'], L['FACE_H']
+
+    def ink_last(x, s, y):
+        buf = bytearray(W * H // 8)
+        face.text(buf, W, H, x, y, s)
+        for c in range(W - 1, -1, -1):
+            if any(buf[r * W + c] for r in range(H // 8)):
+                return c
+        return None
+
+    edges = {'2766mV': ink_last(face.row1_mv_x(2905), '2766mV', L['ROW1_Y']),
+             'v14.3': ink_last(face.row3_right_x('v14.3'), 'v14.3', L['ROW3_Y']),
+             '[B2A1]': ink_last(face.row3_right_x('[B2A1]'),
+                                '[B2A1]', L['ROW3_Y'])}
+    rep.note('ink right edges: %s' % edges)
+    rep.chk(len(set(edges.values())) == 1
+            and L['ROW1_RIGHT_X'] == L['ROW3_RIGHT_X'],
+            'the voltage, version and name share one ink right edge',
+            'edges %s' % edges)
 
     # ... and the firmware really implements this - the mirror alone would not
     # put it on the tag
     src = _read('epd.c')
-    rep.chk('ROW1_RIGHT_X - epd_text_width(b)' in src,
-            'epd.c right-aligns the voltage on ROW1_RIGHT_X', '')
+    rep.chk('ROW1_RIGHT_X - epd_text_width(b) + epd_text_rb(b)' in src,
+            'epd.c right-aligns the voltage by ink on ROW1_RIGHT_X', '')
+    rep.chk('ROW3_RIGHT_X - epd_text_width(b) + epd_text_rb(b)' in src,
+            'epd.c right-aligns row 3 by ink (the old "+ 1" is gone)', '')
     rep.chk('epd_utext_width(r1) > x' in src and 'memmove' in src,
             'epd.c drops the space before the temperature on collision', '')
+    rep.chk('epd_text_rb' in _read('epd_font.c'),
+            'epd_font.c measures the ink right bearing for the face', '')
 
 
 # ---------------------------------------------------------------------------
@@ -425,17 +444,22 @@ def check_row3(face, rep):
     texts = [face.mac_bracket(mac), face.row3_version()]
     for s in texts:
         bx = face.row3_right_x(s)
-        end = bx + face.text_width(s) - 1
-        rep.note('"%s" %d px at %d..%d' % (s, face.text_width(s), bx, end))
-        rep.chk(end == L['ROW3_RIGHT_X'],
-                '"%s" is right aligned on ROW3_RIGHT_X' % s,
-                'ends at %d of %d' % (end, L['ROW3_RIGHT_X']))
+        end = bx + face.text_width(s) - 1          # pen edge (advance box)
+        ink = face.text_rb(s)                      # what the eye compares
+        ink_end = end - ink
+        rep.note('"%s" %d px at %d..%d, ink ends %d (bearing %d)'
+                 % (s, face.text_width(s), bx, end, ink_end, ink))
+        rep.chk(ink_end == L['ROW3_RIGHT_X'] - 1,
+                '"%s" is right aligned on ROW3_RIGHT_X, by ink' % s,
+                'ink ends at %d of %d' % (ink_end, L['ROW3_RIGHT_X']))
         rep.chk(bx >= 0 and end < L['FACE_W'],
                 '"%s" fits on the glass' % s, '%d..%d' % (bx, end))
         first = L['EPD_WIN_GATE_FIRST'] - L['EPD_WIN_GATE_OFFSET']
         last = L['EPD_WIN_GATE_LAST'] - L['EPD_WIN_GATE_OFFSET']
-        rep.chk(bx >= first and end <= last,
-                '"%s" sits inside the per-minute band' % s,
+        # the swap residue question is about INK - an empty advance column
+        # paints nothing, so the ink is what has to sit inside the band
+        rep.chk(bx >= first and ink_end <= last,
+                '"%s" sits inside the per-minute band, by ink' % s,
                 'band %d..%d' % (first, last))
         rep.chk(bx > rx + face.rune_w - 1,
                 '"%s" clears the fixed rune slot' % s,

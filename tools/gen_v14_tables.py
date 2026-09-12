@@ -493,9 +493,17 @@ def emit_chars(path):
 def emit_font(path, glyphs, rune_px, rune_cols):
     bits = bytearray()
     offs = []
+    rbs = []
     for cp, n, adv, blob in glyphs:
         offs.append(len(bits))
         bits.extend(blob)
+        # ink right bearing: how far the glyph's last ink column sits short of
+        # its advance - what "right aligned by ink, not by pen" needs
+        last = 0
+        for c in range(n):
+            if blob[2 * c] | blob[2 * c + 1]:
+                last = c
+        rbs.append(adv - 1 - last)
     total_16 = sum(1 for g in glyphs if g[1] == 16)
     total_8 = len(glyphs) - total_16
 
@@ -526,6 +534,12 @@ static const unsigned char UF_COLS[UF_GLYPH_COUNT] = {
 %s};
 static const unsigned char UF_ADV[UF_GLYPH_COUNT] = {
 %s};
+/* ink right bearing of each glyph: advance - 1 - last ink column.  A string
+ * right aligned BY PEN ends at a column that depends on its last glyph's
+ * shape (the ']' stops 4 px short of 'V'); adding the last glyph's bearing
+ * aligns the INK, which is what the eye compares. */
+static const unsigned char UF_RB[UF_GLYPH_COUNT] = {
+%s};
 static const unsigned char UF_BITS[UF_GLYPH_BYTES] = {
 %s};
 """ % (len(glyphs), total_16, total_8, len(bits),
@@ -534,6 +548,7 @@ static const unsigned char UF_BITS[UF_GLYPH_BYTES] = {
        c_hex_words([o for o in offs]),
        c_hex_bytes([g[1] for g in glyphs]),
        c_hex_bytes([g[2] for g in glyphs]),
+       c_hex_bytes(rbs),
        c_hex(bits)))
 
     lines.append("""

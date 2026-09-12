@@ -34,6 +34,9 @@ int epd_utext(uint8_t *scr, int wpitch, int height, int x, int ytop,
 /* Advance widths, for right-aligning without drawing. */
 int epd_text_width(const char *s);
 int epd_utext_width(const uint16_t *s);
+/* Ink right bearing of the string's last glyph - add it to a pen-right x to
+ * align by what the eye sees.  See epd_font.c. */
+int epd_text_rb(const char *s);
 
 /* The Bluetooth rune, drawn at (x, ytop).  The size is part of the interface
  * because callers lay the device name out around it.  Its width comes from

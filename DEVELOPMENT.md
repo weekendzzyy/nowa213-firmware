@@ -58,7 +58,7 @@ nowa213/
 │   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
 │   │                            #   --window 画窗口底纹 / --compare <照片> 对照参考面板
 │   │                            #   --debug 18,0,1,2 连诊断计数器一起画
-│   ├── verify_v14_layout.py  # ★79 项断言（含否定性自检）
+│   ├── verify_v14_layout.py  # ★81 项断言（含否定性自检）
 │   ├── gen_v14_tables.py     # 生成字体 / 历法 / 符文表
 │   ├── verify_part_lut.py    # LUT 布局断言
 │   ├── verify_time_catchup.py# 时钟追补断言
@@ -87,7 +87,7 @@ nowa213/
 ```powershell
 cd atc1441_src/Firmware
 python build_firmware.py
-# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v14.3 实测 82964 字节）
+# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v14.4 实测 83076 字节）
 ```
 
 ### ⚠️ 编译后必须做 SRAM 自检
@@ -98,7 +98,7 @@ TLSR8359 只有 **64KB SRAM**，栈顶固定在 `0x850000`。`boot.link` **无�
 ```powershell
 cd atc1441_src/Firmware
 ./tc32_windows/bin/tc32-elf-nm.exe out/ATC_Paper.elf | grep _end_bss_
-# 必须 < 0x850000（v14.3 实测 0x84efa1，余量 4191 字节）
+# 必须 < 0x850000（v14.4 实测 0x84efa1，余量 4191 字节）
 ```
 
 **加任何全局/静态大数组前，先算 SRAM 占用。** 用户图当初用 5KB RAM 缓冲即踩此坑，
@@ -116,7 +116,7 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 - **`-t 3000`（关键）**：片上若已跑着 atc1441 固件，其深睡带 retention 标志会让
   `-t 200` 的复位拽不回 bootloader，报 `Chip sleep?`。延长激活窗口到 3 秒即可。
 - **校验（强烈建议）**：写完整片读回逐字节比对，避免「读回瞬断假象」误判。
-  读回长度 = 固件字节数（v14.3 = 82960 = `0x14410`；发布文件名里就有）：
+  读回长度 = 固件字节数（v14.4 = 83072 = `0x14460`；发布文件名里就有）：
   ```powershell
   python TLSR825xComFlasher.py -p COM6 -t 3000 rf 0 0x14224 verify.bin
   python -c "a=open('<固件>.bin','rb').read();b=open('verify.bin','rb').read();print('MATCH' if a==b[:len(a)] else 'MISMATCH')"

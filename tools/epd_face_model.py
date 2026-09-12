@@ -400,6 +400,27 @@ class Face(object):
     def text_width(self, s):
         return sum(self.uf_find(ord(c))[2] for c in s)
 
+    _rb_cache = {}
+
+    def text_rb(self, s):
+        """Ink right bearing of the last glyph - mirror of epd_text_rb(): how
+        many px the glyph's ink stops short of the pen edge.  Measured off the
+        rendered glyph, so a font regeneration cannot desync it."""
+        if not s:
+            return 0
+        ch = s[-1]
+        if ch not in self._rb_cache:
+            W, H = self.L['FACE_W'], self.L['FACE_H']
+            buf = bytearray(W * H // 8)
+            self.text(buf, W, H, 0, 0, ch)
+            last = -1
+            for c in range(W - 1, -1, -1):      # scan columns from the right
+                if any(buf[r * W + c] for r in range(H // 8)):
+                    last = c
+                    break
+            self._rb_cache[ch] = 0 if last < 0 else self.uf_find(ord(ch))[2] - 1 - last
+        return self._rb_cache[ch]
+
     def utext_width(self, cps):
         return sum(self.uf_find(c)[2] for c in cps)
 
@@ -708,9 +729,12 @@ class Face(object):
         return buf.slice(n)
 
     def row1_mv_x(self, mv):
-        """x of the right-aligned voltage: ROW1_RIGHT_X minus its advance."""
+        """Pen x of the voltage, right aligned by INK on ROW1_RIGHT_X: the
+        advance puts the pen edge on RIGHT, then the last glyph's bearing
+        pulls the INK edge back onto RIGHT too."""
         mv = min(mv, self.L['ROW1_MV_MAX'])
-        return self.L['ROW1_RIGHT_X'] - self.text_width('%dmV' % mv)
+        t = '%dmV' % mv
+        return self.L['ROW1_RIGHT_X'] - self.text_width(t) + self.text_rb(t)
 
     def row3(self, t):
         """The row-3 codepoints, or [] when the date is outside the range.
@@ -774,10 +798,11 @@ class Face(object):
             else self.mac_bracket(mac)
 
     def row3_right_x(self, text):
-        # ROW3_RIGHT_X is the last column the string OCCUPIES (inclusive), not
-        # the pen position after it - that is what makes "inside the band"
-        # readable off the header.
-        return self.L['ROW3_RIGHT_X'] - self.text_width(text) + 1
+        # Pen x, right aligned by INK: advance puts the box edge one past
+        # ROW3_RIGHT_X, the last glyph's bearing pulls the ink back onto it -
+        # same formula epd_face runs (v14.3's hard-coded "+ 1" only fitted the
+        # version's trailing digit and left the name's ']' 3 px further left).
+        return self.L['ROW3_RIGHT_X'] - self.text_width(text) + self.text_rb(text)
 
     def row3_rune_x(self):
         # A FIXED slot, from epd_layout.h: the two strings differ in width, so
