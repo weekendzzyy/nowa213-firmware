@@ -16,7 +16,6 @@
 
 RAM uint8_t battery_level;
 RAM uint16_t battery_mv;
-RAM int16_t temperature;
 
 RAM uint8_t hour_refresh = 100;
 RAM uint8_t minute_refresh = 100;
@@ -152,7 +151,6 @@ _attribute_ram_code_ void main_loop(void)
     {
         battery_mv = get_battery_mv();
         battery_level = get_battery_level(battery_mv);
-        temperature = get_temperature_c();
         set_adv_data(EPD_read_temp() * 10, battery_level, battery_mv);
         ble_send_battery(battery_level);
         ble_send_temp(EPD_read_temp() * 10);
@@ -200,7 +198,9 @@ _attribute_ram_code_ void main_loop(void)
 
         // v11.0: dead band instead of `!=` - see TEMP_FULL_HYSTERESIS_C above.
         // The first comparison still fires (last_temp_shown starts at 0x7FFF).
-        int16_t temp_now = EPD_read_temp();
+        // v14.2: (int8_t) - the SSD1680 register is two's complement, so a room
+        // below 0 C must read as negative, not as 200+.
+        int16_t temp_now = (int8_t)EPD_read_temp();
         if ((temp_now > last_temp_shown ? temp_now - last_temp_shown
                                         : last_temp_shown - temp_now) >= TEMP_FULL_HYSTERESIS_C)
         {
@@ -264,7 +264,14 @@ _attribute_ram_code_ void main_loop(void)
             if (full)
             {
                 shown_mv = battery_mv;
-                shown_temp = temperature;
+                /* v14.2: the panel sensor, which is what v13.0 displayed and
+                 * what the BLE side already reports.  v14.0/v14.1 handed this
+                 * `temperature` instead, which is get_temperature_c()'s RAW ADC
+                 * sample - the °C conversion in that function is commented out
+                 * upstream - so the clamp sat at its ceiling and row 1 read 85 C
+                 * all day.  (int8_t) because the SSD1680 register is two's
+                 * complement: a room below 0 C reads 200+ as unsigned. */
+                shown_temp = (int8_t)EPD_read_temp();
             }
 
             epd_display(get_time(), shown_mv, shown_temp, full);

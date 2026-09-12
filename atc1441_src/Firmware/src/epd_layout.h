@@ -1,5 +1,9 @@
 #pragma once
 
+/* The clock layout is derived from the DSEG14 font's metrics, so the font has
+ * to come first: everything CLOCK_* below is computed from it. */
+#include "font_dseg.h"
+
 /* ===========================================================================
  * v14.0 clock face - the single source of truth for every coordinate.
  *
@@ -106,52 +110,57 @@
 #endif
 
 /* ---- row 2: the clock -------------------------------------------------
- * Not a font.  The 40 pt DSEG face the previous layout used has a 0.85
- * digit aspect, so scaling it to a 76 px digit would need 289 px of width;
- * the digits are therefore drawn from geometry (see epd_clock()).
+ * DSEG14 Classic Mini Regular - the same face v13.0 drew with - scaled 3/2,
+ * i.e. 40 px of font -> 60 px on the glass.  The upstream bitmap font cannot
+ * reach 68 px (its digits are 26/40 wide, so 68 px of height would need
+ * 289 px of width); 60 px is what fits between rows 1 and 3 with room to
+ * spare, and it is what the user asked for after seeing v14.1's hand-drawn
+ * segments.
  *
- * The aspect is the reference photo's own, measured off the panel: 37 px of
- * digit to 68 px of height.  CLOCK_H is what the vertical budget allows
- * once two 16 px text rows are placed at ROW1_Y and ROW3_Y.
+ * The 3/2 scale is nearest-neighbour: source row/column n maps to 2 output
+ * rows/columns when n is even and 1 when n is odd, so every stroke keeps its
+ * width within a pixel.  epd_font.c's blitter walks the same pattern, and
+ * tools/epd_face_model.py mirrors it, so the three cannot disagree.
  *
- * A FIXED-SLOT display, like the seven-segment panel it imitates: all four
- * digits own the same cell every time and the colon owns its own narrower
- * slot, so a '1' never shifts its neighbours.  That is not only how a real
- * display behaves - it is what makes the per-minute gate window possible.
- * Centring the face on its own width instead would move the HOUR digits every
- * time a '1' entered or left the minutes (12:09 -> 12:10 narrows by 19 px and
- * re-centres), so the window would have to cover the whole clock, 214 columns
- * instead of the last two slots' 92, and the power saving would be gone.
+ * Fixed slots, as before: every digit owns the same advance cell and the
+ * colon owns a narrower one, so a '1' never shifts its neighbours.  That is
+ * not aesthetic - it is what makes the per-minute gate window possible.
+ * Centring the face on its own measured width instead would move the HOUR
+ * digits every time a '1' entered or left the minutes, so the window would
+ * have to cover the whole clock instead of the two minute slots.
  */
-#define CLOCK_Y           24
-#define CLOCK_H           76
-#define CLOCK_ASPECT_PCT  55
-#define CLOCK_GAP         8
-#define CLOCK_STROKE_PCT  9
+#define CLOCK_SCALE_NUM  3
+#define CLOCK_SCALE_DEN  2
 
-/* ---- derived from the constants above; never write these by hand -------- */
-#define CLOCK_CELL_W   ((CLOCK_H * CLOCK_ASPECT_PCT + 50) / 100)
-#define CLOCK_STROKE   ((CLOCK_H * CLOCK_STROKE_PCT + 50) / 100)
-#define CLOCK_COLON_W  ((CLOCK_CELL_W / 3) < 6 ? 6 : (CLOCK_CELL_W / 3))
-/* four digits, four gaps, the colon slot - the full width of "HH:MM" */
-#define CLOCK_WIDEST   (4 * (CLOCK_CELL_W + CLOCK_GAP) + CLOCK_COLON_W)
-#define CLOCK_X0       ((FACE_W - CLOCK_WIDEST) / 2)
+/* the font's intrinsic metrics (font_dseg.h), scaled to the glass */
+#define CLOCK_H          ((DSEG_FONT_HEIGHT * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN)
+#define CLOCK_DIGIT_ADV  ((DSEG_ADV_DIGIT    * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN)
+/* the colon's 9 px advance would be 13.5 scaled; it is FLOORED to 13, which
+ * pulls both minute digits 1 px left and puts the ones digit's last ink
+ * column exactly on the window band's edge - see EPD_WIN below */
+#define CLOCK_COLON_ADV  ((DSEG_ADV_COLON    * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN)
+/* the ink columns a digit can cover inside its cell, across all ten digits */
+#define CLOCK_INK_X0     ((DSEG_INK_X0 * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN)
+#define CLOCK_INK_LAST   (((DSEG_INK_X0 + DSEG_INK_W) * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN - 1)
+
+#define CLOCK_CELL_W     CLOCK_DIGIT_ADV
+#define CLOCK_COLON_W    CLOCK_COLON_ADV
+/* four digits, four advances, the colon's narrower cell */
+#define CLOCK_WIDEST     (4 * CLOCK_DIGIT_ADV + CLOCK_COLON_ADV)
+#define CLOCK_X0         ((FACE_W - CLOCK_WIDEST) / 2)
+#define CLOCK_Y          31
 
 /* x of slot i, i = 0..4, left to right: digit digit colon digit digit.
- * Slots 0..2 are spaced by a whole cell, and slot 2 is the narrower colon, so
- * everything from slot 3 on is CLOCK_CELL_W - CLOCK_COLON_W further left than
- * a uniform stride would put it. */
-#define CLOCK_SLOT_X(i) (CLOCK_X0 + (i) * (CLOCK_CELL_W + CLOCK_GAP) \
-                         - ((i) >= 3 ? (CLOCK_CELL_W - CLOCK_COLON_W) : 0))
+ * Two digits precede the colon, so slots 3 and 4 shift by its (floored)
+ * advance as well. */
+#define CLOCK_SLOT_X(i)  (CLOCK_X0 + ((i) < 3 ? (i) : 2) * CLOCK_DIGIT_ADV \
+                          + ((i) >= 3 ? (CLOCK_COLON_ADV + ((i) - 3) * CLOCK_DIGIT_ADV) : 0))
 
 #if CLOCK_WIDEST > FACE_W
 #error "clock: the widest HH:MM no longer fits across the glass"
 #endif
 #if CLOCK_X0 < 0
 #error "clock: the face is wider than the glass"
-#endif
-#if CLOCK_STROKE * 4 >= CLOCK_CELL_W
-#error "clock: stroke is too thick for the cell - the bars degenerate"
 #endif
 
 /* ===========================================================================
@@ -169,24 +178,44 @@
  * slots above guarantee the hour digits hold still.  It scans 92 of 296 lines,
  * 31%, against v13.0's 137 (46%), with much larger digits.
  *
- * The window is DERIVED from those slots rather than written down, so it
+ * The window covers the columns a partial tick can change:
+ *   - the two minute digits' ink (CLOCK_MINUTE_INK_FIRST .. LAST) - the hour
+ *     digits and the colon only ever change on a full refresh, and
+ *   - row 3's right corner (ROW3_RIGHT_X), which v14.1 swaps between the
+ *     advertised name and the version every ROW3_ALT_SECS.
+ * The two ranges are contiguous by construction - asserted below - so one
+ * gate run covers both.
+ *
+ * The window is DERIVED from those numbers rather than written down, so it
  * cannot drift from the layout.  tools/verify_v14_layout.py then recomputes
  * the union of columns that actually change across all 1440 renderings of
- * "HH:MM" and fails if it is not inside this range - which is really a check
- * that every digit's ink stays inside its own cell.
+ * "HH:MM" in both swap states and fails if it is not inside this range.
  *
  * The other condition the window depends on lives in app.c: the glass must be
  * given the SAME values between full refreshes, or content inside this band
- * (row 1's temperature and voltage sit at x 140..231) would be repainted every
- * minute.  See the "snapshot" block there.
+ * would be repainted every minute.  Row 1's voltage sits at x 188..231, inside
+ * the band - see the "snapshot" block there.
  * ===========================================================================
  */
 #define EPD_WIN_GATE_OFFSET 47
-/* slot 3 is the first minute digit, slot 4 the second; CLOCK_CELL_W wide */
-#define EPD_WIN_GATE_FIRST  (CLOCK_SLOT_X(3) + EPD_WIN_GATE_OFFSET)
-#define EPD_WIN_GATE_LAST   (CLOCK_SLOT_X(4) + CLOCK_CELL_W - 1 + EPD_WIN_GATE_OFFSET)
+/* the ink of the two minute digits: each cell's ink is CLOCK_INK_X0 +
+ * CLOCK_INK_LAST inside a CLOCK_DIGIT_ADV-wide slot */
+#define CLOCK_MINUTE_TENS_X (CLOCK_SLOT_X(3))
+#define CLOCK_MINUTE_INK_FIRST (CLOCK_MINUTE_TENS_X + CLOCK_INK_X0)
+#define CLOCK_MINUTE_INK_LAST  (CLOCK_SLOT_X(4) + CLOCK_INK_LAST)
+
+#define EPD_WIN_GLASS_FIRST  (CLOCK_MINUTE_INK_FIRST)
+#define EPD_WIN_GLASS_LAST   (ROW3_RIGHT_X)
+
+#define EPD_WIN_GATE_FIRST  (EPD_WIN_GLASS_FIRST + EPD_WIN_GATE_OFFSET)
+#define EPD_WIN_GATE_LAST   (EPD_WIN_GLASS_LAST + EPD_WIN_GATE_OFFSET)
 #define EPD_WIN_GATES       (EPD_WIN_GATE_LAST - EPD_WIN_GATE_FIRST + 1)
 
+/* The minute digits' ink must not reach past the right corner's right edge, or
+ * the union would be non-contiguous and one gate run could not cover both. */
+#if CLOCK_MINUTE_INK_LAST > ROW3_RIGHT_X
+#error "clock: the minute digits' ink runs past the right corner - the window could not be one contiguous gate run"
+#endif
 /* The window must not also be asked to carry anything that changes off the
  * minute - those all force a full refresh instead (see app.c).  The name/version
  * swap is the one deliberate exception: it changes on a 5-minute boundary, which

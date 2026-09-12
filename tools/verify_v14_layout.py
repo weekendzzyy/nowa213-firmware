@@ -118,14 +118,8 @@ def cell_ink(face):
     L, W, H = face.L, face.L['FACE_W'], face.L['FACE_H']
     out = {}
     for ch in GLYPHS:
-        w = L['CLOCK_COLON_W'] if ch == ':' else L['CLOCK_CELL_W']
         buf = bytearray(W * H // 8)
-        if ch == ':':
-            face.draw_colon(buf, W, H, 0, L['CLOCK_Y'], L['CLOCK_H'],
-                            L['CLOCK_STROKE'])
-        else:
-            face.draw_digit(buf, W, H, 0, L['CLOCK_Y'], w, L['CLOCK_H'],
-                            L['CLOCK_STROKE'], ch)
+        face.draw_dseg(buf, W, H, 0, L['CLOCK_Y'], ch)
         xs = [x for r in range(H // 8) for x in range(W) if buf[r * W + x]]
         out[ch] = (min(xs), max(xs)) if xs else None
     return out
@@ -135,16 +129,13 @@ def check_clock(face, rep):
     L = face.L
     rep.head('the clock')
     slots = [face.slot_x(i) for i in range(5)]
-    rep.note('slot x: %s   cell %d px, colon %d px, stroke %d px'
-             % (slots, L['CLOCK_CELL_W'], L['CLOCK_COLON_W'], L['CLOCK_STROKE']))
+    rep.note('slot x: %s   digit cell %d px, colon %d px; DSEG14 at 3/2 = %d px tall'
+             % (slots, L['CLOCK_CELL_W'], L['CLOCK_COLON_W'], L['CLOCK_H']))
 
     rep.chk(L['CLOCK_X0'] >= 0 and L['CLOCK_X0'] + L['CLOCK_WIDEST'] <= L['FACE_W'],
             'the widest HH:MM fits on the glass',
             '%d..%d of %d' % (L['CLOCK_X0'], L['CLOCK_X0'] + L['CLOCK_WIDEST'] - 1,
                               L['FACE_W']))
-    rep.chk(L['CLOCK_STROKE'] * 4 < L['CLOCK_CELL_W'],
-            'the stroke leaves the bars distinguishable',
-            '4*%d < %d' % (L['CLOCK_STROKE'], L['CLOCK_CELL_W']))
 
     # slots laid out left to right without overlapping
     ends = [s + face.slot_w(i) - 1 for i, s in enumerate(slots)]
@@ -155,14 +146,13 @@ def check_clock(face, rep):
     rep.chk(ok, 'the five slots do not overlap',
             'ends %s' % ends)
 
-    # THE invariant the gate window rests on
+    # THE invariant the gate window rests on: every glyph's ink inside its cell
     ink = cell_ink(face)
     bad = [(c, ink[c]) for c in GLYPHS
            if ink[c] is None or ink[c][0] < 0 or ink[c][1] > glyph_cell_w(face, c) - 1]
     rep.chk(not bad, 'every glyph stays inside its own cell',
-            'ink %s, colon %d, cell %d'
-            % ({c: ink[c] for c in GLYPHS},
-               face.L['CLOCK_COLON_W'], face.L['CLOCK_CELL_W']))
+            'ink %s, colon cell %d' % ({c: ink[c] for c in GLYPHS},
+                                       L['CLOCK_COLON_W']))
     if bad:
         rep.note('outside: %s' % bad)
 
@@ -175,20 +165,14 @@ def column_bits(face):
 
     The scan is over the WHOLE buffer width, not 0..w-1: a glyph that paints
     outside its own cell is the defect this exists to catch, and clipping the
-    scan to the cell would hide it.  (It did: that is why the off-by-one in the
-    right-hand bars survived the first run of this script.)
+    scan to the cell would hide it.  (It did: that is why the off-by-one in
+    v14.0's right-hand bars survived the first run of this script.)
     """
     L, W, H = face.L, face.L['FACE_W'], face.L['FACE_H']
     out = {}
     for ch in GLYPHS:
-        w = glyph_cell_w(face, ch)
         buf = bytearray(W * H // 8)
-        if ch == ':':
-            face.draw_colon(buf, W, H, 0, L['CLOCK_Y'], L['CLOCK_H'],
-                            L['CLOCK_STROKE'])
-        else:
-            face.draw_digit(buf, W, H, 0, L['CLOCK_Y'], w, L['CLOCK_H'],
-                            L['CLOCK_STROKE'], ch)
+        face.draw_dseg(buf, W, H, 0, L['CLOCK_Y'], ch)
         cols = {}
         for x in range(W):
             col = tuple((buf[((y >> 3) * W + x)] >> (y & 7)) & 1
@@ -265,6 +249,7 @@ def check_window(face, rep, cells, union):
              % (a, b, swap_lo, swap_hi))
     lo = min(lo, swap_lo)
     hi = max(hi, swap_hi)
+    union = (lo, hi, ticks, creep)
 
     rep.note('changed columns: glass %d..%d  ->  gate %d..%d'
              % (lo, hi, got_first, got_last))
@@ -748,18 +733,21 @@ def check_version(face, rep):
             'so the two cannot disagree')
 
     font = _read('epd_font.c')
-    rep.chk('int xr = x1 - t;' in font,
-            'the digit right-hand bars sit inside the cell',
-            'epd_font.c: xr = x1 - t')
-    rep.chk('lone' not in font,
-            'the special case for a narrow "1" is gone',
-            'fixed slots make it unnecessary')
     rep.chk('CLOCK_SLOT_X' in font,
             'epd_font.c lays the clock out on the slots',
             '')
     rep.chk('clock_char_w' not in font,
             'nothing computes a variable clock width any more',
             'the face is CLOCK_WIDEST wide for every H:MM')
+    rep.chk('DSEG_GLYPHS' in font and 'fill_quad' not in font,
+            'the clock is drawn from the DSEG14 bitmap, not from segments',
+            'the hand-drawn rasteriser of v14.0/v14.1 is gone')
+    rep.chk('CLOCK_SCALE_NUM' in _read('epd_layout.h'),
+            'the 3/2 scale is a named constant the mirror reads too',
+            '')
+    rep.chk('uint16_t get_temperature_c' not in _read('battery.c'),
+            'the raw-ADC "temperature" function is gone',
+            'the face reads the panel sensor (EPD_read_temp) instead')
 
     bwr = _read('epd_bwr_213.c')
     rep.chk('EPD_WIN_GATES' in bwr and 'EPD_WIN_GATE_FIRST' in bwr,
@@ -788,30 +776,28 @@ def check_falsification(face, rep, cells, union, row3_worst):
     mac = (0xA1, 0xB2, 0xC3)
     rep.head('the checks can fail')
 
-    # (a) the off-by-one that was really there: right-hand bars one column too
-    #     far right, i.e. ink outside the cell the window is derived from
-    def shifted(self, buf, wp, ht, x, y, w, h, t, ch):
-        on = self.segments(ch)
-        x1, y1, ym = x + w - 1, y + h - 1, y + h // 2
-        s = max(t // 2, 2)
-        xr = x1 - t + 1
-        for _label, px, py in segment_quads(x, x1, y, y1, ym, t, s, xr, on):
-            self.fill_quad(buf, wp, ht, px, py)
+    # (a) a glyph drawn with its ink pushed right out of its own cell.  The
+    #     window is derived from the metrics font_dseg.h declares, so a render
+    #     that drifts from them is ink the window does not promise to repaint.
+    #     (The defect this stands in for is v14.0's right-hand bars, which sat
+    #     one column outside their cell for the same reason.)
+    orig = Face.draw_dseg
 
-    orig = Face.draw_digit
-    Face.draw_digit = shifted
+    def shifted(self, buf, wp, ht, x, y, ch):
+        orig(self, buf, wp, ht, x + 8, y, ch)
+
+    Face.draw_dseg = shifted
     try:
         f2 = Face(face.src)
-        u2 = minute_tick_union(f2, column_bits(f2))
-        g_first = u2[0] + L['EPD_WIN_GATE_OFFSET']
-        g_last = u2[1] + L['EPD_WIN_GATE_OFFSET']
-        rep.chk(not (L['EPD_WIN_GATE_FIRST'] <= g_first
-                     and g_last <= L['EPD_WIN_GATE_LAST']),
-                'the old off-by-one in the right-hand bars is caught',
-                'ink would change gate %d, window ends at %d'
-                % (g_last, L['EPD_WIN_GATE_LAST']))
+        ink2 = cell_ink(f2)
+        bad = [c for c in GLYPHS
+               if ink2[c] and ink2[c][1] > glyph_cell_w(f2, c) - 1]
+        rep.chk(bad != [], 'a glyph pushed right out of its cell is caught',
+                ('%s ink ends at %d, cell ends at %d'
+                 % (bad[0], ink2[bad[0]][1], glyph_cell_w(f2, bad[0]) - 1))
+                if bad else '')
     finally:
-        Face.draw_digit = orig
+        Face.draw_dseg = orig
 
     # (b) the row-1 buffer at its original 24 entries
     need = len(face.row1(ts(2050, 12, 26, 12, 0), 9999, -40))
@@ -842,17 +828,20 @@ def check_falsification(face, rep, cells, union, row3_worst):
             'one gate of slack is caught by the exactness check',
             'start %d vs union %d' % (L['EPD_WIN_GATE_FIRST'] + 1, lo))
 
-    # (d) a stroke wide enough to swallow the cell
-    saved = L.obj.get('CLOCK_STROKE_PCT')
-    L.obj['CLOCK_STROKE_PCT'] = '30'
+    # (d) a font header that overstates the digits' ink x-offset.  The window's
+    #     first edge is derived from DSEG_INK_X0, so a wrong number narrows the
+    #     window behind the renderer's back and leaves the first ink columns of
+    #     the minute tens digit unpainted.
+    saved = L.obj.get('DSEG_INK_X0')
+    L.obj['DSEG_INK_X0'] = '12'          # the real value is 4
     L._cache.clear()
-    stroke = L['CLOCK_STROKE']
-    degenerate = stroke * 4 >= L['CLOCK_CELL_W']
-    L.obj['CLOCK_STROKE_PCT'] = saved
+    first = L['CLOCK_MINUTE_INK_FIRST']
+    L.obj['DSEG_INK_X0'] = saved
     L._cache.clear()
-    rep.chk(degenerate, 'a degenerate stroke is caught by the header assertion',
-            'a 30%% stroke gives %d px bars in a %d px cell'
-            % (stroke, L['CLOCK_CELL_W']))
+    rep.chk(first > union[0],
+            'a font header that overstates the ink x-offset is caught',
+            'the window would start at glass %d, the ink starts at %d'
+            % (first, union[0]))
 
     # (e) one more glyph than the WIDEST row-3 text must trip the collision test
     w_now = row3_worst[0]
@@ -929,7 +918,7 @@ def main():
     check_clock(face, rep)
     cells = column_bits(face)
     union = minute_tick_union(face, cells)
-    check_window(face, rep, cells, union)
+    union = check_window(face, rep, cells, union)
     check_row1(face, rep)
     row3_worst = check_row3(face, rep)
     check_calendar(face, rep)

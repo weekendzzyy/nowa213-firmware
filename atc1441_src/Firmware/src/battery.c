@@ -100,49 +100,18 @@ _attribute_ram_code_ uint8_t get_battery_level(uint16_t battery_mv)
 	return battery_level;
 }
 
-_attribute_ram_code_ void adc_temp_init(void)
-{
-	adc_set_chn_enable_and_max_state_cnt(ADC_MISC_CHN, 2);
-	adc_set_state_length(240, 0, 10);  	//set R_max_mc,R_max_c,R_max_s
-
-	//set Vbat divider select,
-	adc_set_vref_vbat_divider(ADC_VBAT_DIVIDER_OFF);
-	//ADC_VBAT_Scale = VBAT_Scale_tab[ADC_VBAT_DIVIDER_OFF];
-
-	adc_set_input_mode(ADC_MISC_CHN, DIFFERENTIAL_MODE);
-	adc_set_ain_channel_differential_mode(ADC_MISC_CHN, TEMSENSORP, TEMSENSORN);
-	adc_set_ref_voltage(ADC_MISC_CHN, ADC_VREF_1P2V);//set channel Vref
-	//ADC_Vref = (unsigned char)ADC_VREF_1P2V;
-	adc_set_resolution(ADC_MISC_CHN, RES14);//set resolution
-	//Number of ADC clock cycles in sampling phase
-	adc_set_tsample_cycle(ADC_MISC_CHN, SAMPLING_CYCLES_6);
-
-	//set Analog input pre-scaling and
-	adc_set_ain_pre_scaler(ADC_PRESCALER_1);
-	//ADC_Pre_Scale = 1<<(unsigned char)ADC_PRESCALER_1F8;
-	//set NORMAL mode
-	adc_set_mode(ADC_NORMAL_MODE);
-
-}
-
-_attribute_ram_code_ uint16_t get_temperature_c(void)
-{
-	analog_write(0x07, analog_read(0x07) & (~BIT(4)));
-    adc_init();
-	adc_temp_init();
-    adc_power_on_sar_adc(1);
-	uint16_t temp_reading = adc_sample_and_get_result();
-	analog_write(0x07, analog_read(0x07) | BIT(4));
-    return temp_reading;
-	/*
-	uint16_t temp_reading;
-	analog_write(0x07, analog_read(0x07) & (~BIT(4)));
-	temp_reading = get_adc_reading(TEMSENSORP, TEMSENSORN);
-	analog_write(0x07, analog_read(0x07) | BIT(4));
-
-	
-    unsigned short  adc_temp_value = 0;
-    adc_sample_and_get_result();
-    adc_temp_value = 579-((temp_reading * 840)>>13);
-    return adc_temp_value;*/
-}
+/* get_temperature_c() and adc_temp_init() were removed in v14.2.
+ *
+ * They read the TLSR8359's own ADC in differential mode across the die's
+ * temperature-sensor pins and returned the RAW SAMPLE - the °C conversion
+ * (579 - ((raw * 840) >> 13)) is commented out upstream, and the name says
+ * "c" anyway.  Nothing ever used the number for anything but drawing it, so
+ * v13.0's panel showed it as a plausible-looking temperature while the ADC
+ * was actually reporting hundreds of counts.
+ *
+ * v14.0 rewrote the face around the wrong one of the two sensors and the
+ * row-1 clamp sat at its ceiling: the tag read 85 C all day.  The panel
+ * sensor (EPD_read_temp(), the SSD1680's own die sensor - the same reading
+ * the LUT selection and the BLE side use) is the display source now, and
+ * both of these went away with it.
+ */

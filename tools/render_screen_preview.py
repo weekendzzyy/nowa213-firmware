@@ -264,9 +264,9 @@ def main():
     else:
         print('row 3: counters H%02dT%dB%dL%d   (calendar text suppressed)'
               % debug)
-    print('clock: slots %s  cell %d px  stroke %d px  height %d px'
+    print('clock: slots %s  digit cell %d px  DSEG14 at 3/2 = %d px tall'
           % ([face.slot_x(i) for i in range(5)], L['CLOCK_CELL_W'],
-             L['CLOCK_STROKE'], L['CLOCK_H']))
+             L['CLOCK_H']))
 
     os.makedirs(OUTDIR, exist_ok=True)
     band = (L['EPD_WIN_GATE_FIRST'], L['EPD_WIN_GATE_LAST']) if args.window else None

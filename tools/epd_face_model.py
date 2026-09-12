@@ -210,6 +210,14 @@ class Macros(object):
                                  expr)
         self._cache = {}
 
+    def merge(self, other):
+        """Fold another header's defines in - epd_layout.h #includes
+        font_dseg.h and derives the clock layout from its metrics, so the
+        mirror has to see both files as one namespace."""
+        self.obj.update(other.obj)
+        self.fn.update(other.fn)
+        self._cache = {}
+
     def __getitem__(self, name):
         return self.call(name)
 
@@ -283,6 +291,9 @@ class Face(object):
     def __init__(self, src=SRC):
         self.src = src
         lay = parse_defines(_read('epd_layout.h'))
+        # epd_layout.h #includes font_dseg.h and derives the clock layout from
+        # its metrics, so the mirror merges the same two files
+        lay.merge(parse_defines(_read('font_dseg.h')))
         self.L = lay
 
         font = _read('font_unifont.h')
@@ -308,6 +319,17 @@ class Face(object):
         self.lunar_info = parse_int_array(cal, 'CAL_LUNAR_INFO')
         self.term_month = parse_int_array(cal, 'CAL_TERM_MONTH')
         self.term_day = parse_2d_array(cal, 'CAL_TERM_DAY', self.cal['CAL_TERM_YEARS'])
+
+        # the DSEG14 clock font: glyph table + bitmap + a codepoint index
+        dseg = _read('font_dseg.h')
+        self.dseg_glyphs = []
+        for m in re.finditer(r'\{\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),'
+                             r'\s*(-?\d+),\s*(-?\d+)\s*\},\s*/\* (\S+) \*/', dseg):
+            self.dseg_glyphs.append(tuple(int(v) for v in m.groups()[:6])
+                                    + (m.group(7),))
+        self.dseg_index = {g[6]: i for i, g in enumerate(self.dseg_glyphs)}
+        self.dseg_bits = parse_int_array(dseg, 'DSEG_BITS')
+        self.dseg_define = parse_defines(dseg)
 
         # cal_row3()'s scratch array, and the buffer epd_face() hands it
         self.ch_maxn = parse_defines(_read('calendar.h'))['CAL_ROW3_MAX']
@@ -411,8 +433,11 @@ class Face(object):
                 if rows != set(self.rune_h - 1 - r for r in rows)]
 
     # -- clock --------------------------------------------------------------
+    # DSEG14 Classic Mini Regular scaled 3/2 - the same face v13.0 drew with.
     # Fixed slots, mirroring epd_clock(): slot i is at CLOCK_SLOT_X(i) for every
-    # rendering, slot 2 is the colon, and a digit always draws CLOCK_CELL_W wide.
+    # rendering, slot 2 is the colon.  The glyph metrics come from font_dseg.h,
+    # and the blitter walks the same 3/2 pattern the C does: source row/column n
+    # expands to 2 output rows/columns when n is even, 1 when n is odd.
     def slot_x(self, i):
         return self.L.call('CLOCK_SLOT_X', i)
 
@@ -423,110 +448,55 @@ class Face(object):
         """Constant now - the face is the same width for every "HH:MM"."""
         return self.L['CLOCK_WIDEST']
 
-    def clock_pen(self, s):
-        return self.L['CLOCK_X0']
+    def _dseg(self, ch):
+        i = self.dseg_index.get(ch)
+        return None if i is None else self.dseg_glyphs[i]
 
-    def clock_spans(self, s):
-        """[(x0, x1)] per character, inclusive, as epd_clock lays them out."""
-        out = []
-        for i in range(len(s)):
-            x = self.slot_x(i)
-            out.append((x, x + self.slot_w(i) - 1))
-        return out
+    def draw_digit(self, buf, wp, ht, x, y, w, h, t, ch):
+        self.draw_dseg(buf, wp, ht, x, y, ch)
 
-    def clock_minute_span(self, s):
-        a, b = self.clock_spans(s)[3], self.clock_spans(s)[4]
-        return a[0], b[1]
+    def draw_colon(self, buf, wp, ht, x, y, h, t):
+        self.draw_dseg(buf, wp, ht, x, y, ':')
+
+    def draw_dseg(self, buf, wp, ht, x, y, ch):
+        """Mirror of epd_clock()'s glyph loop.
+
+        (x, y) is the slot origin: the font's baseline sits CLOCK_H below it,
+        and a glyph of height h starts (DSEG_FONT_HEIGHT - h) scaled pixels
+        above its own ink - so all ten digits share one baseline.
+        """
+        g = self._dseg(ch)
+        if g is None:
+            return
+        off, gw, gh, adv, xo, yo = g[:6]
+        num, den = self.L['CLOCK_SCALE_NUM'], self.L['CLOCK_SCALE_DEN']
+        x += (xo * num) // den
+        y += ((self.L['DSEG_FONT_HEIGHT'] - gh) * num) // den
+        bit = off * 8
+        bits = self.dseg_bits
+        oy = 0
+        for sy in range(gh):
+            rh = 1 if (sy & 1) else 2
+            ox = 0
+            for sx in range(gw):
+                rw = 1 if (sx & 1) else 2
+                if bits[bit >> 3] & (0x80 >> (bit & 7)):
+                    for a in range(rh):
+                        for b in range(rw):
+                            self.plot(buf, wp, ht, x + ox + b, y + oy + a)
+                bit += 1
+                ox += rw
+            oy += rh
+
+    def clock(self, buf, wp, ht, s):
+        for i, ch in enumerate(s):
+            self.draw_dseg(buf, wp, ht, self.slot_x(i), self.L['CLOCK_Y'], ch)
 
     def plot(self, buf, wpitch, height, x, y):
         if x < 0 or x >= wpitch or y < 0 or y >= height:
             return
         buf[(y >> 3) * wpitch + x] |= 1 << (y & 7)
 
-    def fill_quad(self, buf, wpitch, height, px, py):
-        """Mirror of fill_quad(): scan lines, even-odd, crossing rounded half
-        away from zero.  The C keeps four crossing slots and drops any beyond
-        the fourth; the mirror does the same so a degenerate quad can't draw
-        more here than it does on the panel."""
-        ymin, ymax = min(py), max(py)
-        for y in range(ymin, ymax + 1):
-            xs = []
-            for i in range(4):
-                j = (i + 1) & 3
-                ax, ay, bx, by = px[i], py[i], px[j], py[j]
-                if ay == by:
-                    continue
-                if ay > by:
-                    ax, bx = bx, ax
-                    ay, by = by, ay
-                if ay <= y < by:
-                    den = by - ay
-                    num = (y - ay) * (bx - ax)
-                    off = _cdiv(2 * num + den, 2 * den) if num >= 0 \
-                        else _cdiv(2 * num - den, 2 * den)
-                    if len(xs) < 4:
-                        xs.append(ax + off)
-            if len(xs) < 2:
-                continue
-            xs.sort()
-            for a in range(0, len(xs) - 1, 2):
-                x0, x1 = max(xs[a], 0), min(xs[a + 1], wpitch - 1)
-                for x in range(x0, x1 + 1):
-                    self.plot(buf, wpitch, height, x, y)
-
-    def segments(self, ch):
-        return {'0': 'abcdef', '1': 'bc', '2': 'abged', '3': 'abgcd',
-                '4': 'fgbc', '5': 'afgcd', '6': 'afgecd', '7': 'abc',
-                '8': 'abcdefg', '9': 'abcdfg'}.get(ch, '')
-
-    def draw_digit(self, buf, wp, ht, x, y, w, h, t, ch):
-        on = self.segments(ch)
-        x1, y1, ym = x + w - 1, y + h - 1, y + h // 2
-        s = max(t // 2, 2)
-        xr = x1 - t
-
-        def seg_h(yt):
-            self.fill_quad(buf, wp, ht,
-                           [x + s, x1 - s, x1 - 2 * s, x + 2 * s],
-                           [yt, yt, yt + t, yt + t])
-
-        if 'a' in on:
-            seg_h(y)
-        if 'g' in on:
-            seg_h(ym - t // 2)
-        if 'd' in on:
-            seg_h(y1 - t + 1)
-        if 'f' in on:
-            self.fill_quad(buf, wp, ht, [x, x + t, x + t, x],
-                           [y + s, y + 2 * s, ym - s, ym])
-        if 'b' in on:
-            self.fill_quad(buf, wp, ht, [xr, xr + t, xr + t, xr],
-                           [y + s, y + 2 * s, ym - s, ym])
-        if 'e' in on:
-            self.fill_quad(buf, wp, ht, [x, x + t, x + t, x],
-                           [ym + s, ym + 2 * s, y1 - s, y1])
-        if 'c' in on:
-            self.fill_quad(buf, wp, ht, [xr, xr + t, xr + t, xr],
-                           [ym + s, ym + 2 * s, y1 - s, y1])
-
-    def draw_colon(self, buf, wp, ht, x, y, h, t):
-        cx = x + (self.L['CLOCK_COLON_W'] - t) // 2
-        for cy in (y + h * 30 // 100, y + h * 68 // 100):
-            self.fill_quad(buf, wp, ht, [cx, cx + t, cx + t, cx],
-                           [cy, cy, cy + t, cy + t])
-
-    def clock(self, buf, wp, ht, s):
-        t = self.L['CLOCK_STROKE']
-        for i, ch in enumerate(s):
-            x = self.slot_x(i)
-            if ch == ':':
-                self.draw_colon(buf, wp, ht, x, self.L['CLOCK_Y'],
-                                self.L['CLOCK_H'], t)
-            elif ch.isdigit():
-                self.draw_digit(buf, wp, ht, x, self.L['CLOCK_Y'],
-                                self.L['CLOCK_CELL_W'], self.L['CLOCK_H'], t, ch)
-
-    # -- calendar -----------------------------------------------------------
     def days_from_civil(self, y, m, d):
         y -= 1 if m <= 2 else 0
         era = _cdiv(y if y >= 0 else y - 399, 400)

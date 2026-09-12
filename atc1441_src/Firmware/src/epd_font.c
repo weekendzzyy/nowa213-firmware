@@ -138,15 +138,24 @@ void epd_rune(uint8_t *scr, int wpitch, int height, int x, int ytop)
 }
 
 /* ===========================================================================
- * The seven-segment clock
+ * The clock - DSEG14 Classic Mini Regular, scaled 3/2 (40 px of font -> 60 px
+ * on the glass).  This is the same face v13.0 drew with; the hand-drawn
+ * segments of v14.0/v14.1 are gone.  The upstream bitmap font cannot reach
+ * 68 px (26/40 digits would need 289 px of width), and 60 px is what fits
+ * between rows 1 and 3 - and what the user asked for after seeing the
+ * hand-drawn face.
  *
- * Drawn from geometry because no font on the toolchain has the right aspect:
- * the DSEG face is 0.85, the reference panel's digits are 0.55, and at 76 px
- * of height that difference is the whole budget.
+ * The bitmap (font_dseg.h) is a GFX bitstream: MSB first, `w` bits per row,
+ * rows packed continuously with no byte alignment between rows, each glyph
+ * starting on a byte boundary.  The panel buffer is column-major, so drawing
+ * is a per-pixel transpose.
  *
- * Everything is integer arithmetic on purpose.  The rasteriser is mirrored by
- * tools/verify_v14_layout.py using the same formulas, so the preview the tool
- * prints is the bitmap the firmware will produce - not an artist's impression.
+ * The 3/2 scale is nearest-neighbour: source row/column n expands to TWO
+ * output rows/columns when n is even and ONE when n is odd, so no per-pixel
+ * division is needed and a stroke keeps its width within a pixel.  Note that
+ * an odd-height glyph (the '7' is 37) then covers ceil(h*3/2) rows - still
+ * inside CLOCK_H.  tools/epd_face_model.py walks the identical pattern, so
+ * the preview the tool prints is the bitmap the firmware produces.
  * ===========================================================================
  */
 
@@ -158,215 +167,59 @@ static void plot(uint8_t *scr, int wpitch, int height, int x, int y)
     scr[(y >> 3) * wpitch + x] |= (uint8_t)(1 << (y & 7));
 }
 
-/* Scan-line fill of a 4-vertex polygon, even-odd rule, one span per row.
- * Vertices are normalised to top-down per edge and the crossing is rounded
- * half away from zero, which is what the mirror in the verify script does. */
-static void fill_quad(uint8_t *scr, int wpitch, int height, const int *px,
-                      const int *py)
+static const DSEG_Glyph *dseg_find(char ch)
 {
-    int ymin = py[0], ymax = py[0], i, y;
-
-    for (i = 1; i < 4; i++)
-    {
-        if (py[i] < ymin)
-            ymin = py[i];
-        if (py[i] > ymax)
-            ymax = py[i];
-    }
-
-    for (y = ymin; y <= ymax; y++)
-    {
-        int xs[4], nx = 0, a, b;
-
-        for (i = 0; i < 4; i++)
-        {
-            int j = (i + 1) & 3;
-            int ax = px[i], ay = py[i], bx = px[j], by = py[j];
-
-            if (ay == by)
-                continue;
-            if (ay > by)
-            {
-                int t = ax; ax = bx; bx = t;
-                t = ay; ay = by; by = t;
-            }
-            if (ay <= y && y < by)
-            {
-                int den = by - ay;
-                int num = (y - ay) * (bx - ax);
-                int off = (num >= 0) ? (2 * num + den) / (2 * den)
-                                     : (2 * num - den) / (2 * den);
-                if (nx < 4)
-                    xs[nx++] = ax + off;
-            }
-        }
-
-        for (a = 1; a < nx; a++) /* at most four entries */
-        {
-            int v = xs[a];
-            for (b = a - 1; b >= 0 && xs[b] > v; b--)
-                xs[b + 1] = xs[b];
-            xs[b + 1] = v;
-        }
-
-        for (a = 0; a + 1 < nx; a += 2)
-        {
-            int x, x0 = xs[a], x1 = xs[a + 1];
-            if (x0 < 0)
-                x0 = 0;
-            if (x1 >= wpitch)
-                x1 = wpitch - 1;
-            for (x = x0; x <= x1; x++)
-                plot(scr, wpitch, height, x, y);
-        }
-    }
-}
-
-static int seg_on(const char *on, char s)
-{
-    while (*on)
-        if (*on++ == s)
-            return 1;
+    if (ch >= '0' && ch <= '9')
+        return &DSEG_GLYPHS[ch - '0'];
+    if (ch == ':')
+        return &DSEG_GLYPHS[10];
     return 0;
-}
-
-static const char *segments(char ch)
-{
-    switch (ch)
-    {
-    case '0': return "abcdef";
-    case '1': return "bc";
-    case '2': return "abged";
-    case '3': return "abgcd";
-    case '4': return "fgbc";
-    case '5': return "afgcd";
-    case '6': return "afgecd";
-    case '7': return "abc";
-    case '8': return "abcdefg";
-    case '9': return "abcdfg";
-    default:  return "";
-    }
-}
-
-/* The 45-degree mitre is s, deliberately HALF the stroke thickness.  With
- * s = t the bars recede so far that the face reads as six loose lozenges
- * instead of a digit; the reference panel has segments separated by a thin
- * seam, not a wide notch.
- *
- * INVARIANT: every segment of a digit stays inside its cell [x, x+w-1].  The
- * right-hand bars were first placed at x1 - t + 1, one column further from the
- * right edge than the left-hand bars are from the left edge.  That looked 1 px
- * lopsided and, worse, put ink one column OUTSIDE the cell - and the per-minute
- * gate window is derived from these cell spans (see epd_layout.h), so ink
- * outside its cell is ink the window does not promise to repaint.  At x1 - t
- * the bar occupies [x1-t, x1], symmetric with the left bar's [x, x+t].
- * tools/verify_v14_layout.py asserts the invariant for all 11 glyphs. */
-static void draw_digit(uint8_t *scr, int wp, int ht, int x, int y, int w, int h,
-                       int t, char ch)
-{
-    const char *on = segments(ch);
-    int x1 = x + w - 1, y1 = y + h - 1, ym = y + h / 2;
-    int s = t / 2;
-    int xr = x1 - t; /* right-hand bars, symmetric with the left bar's [x, x+t] */
-    int px[4], py[4];
-
-    if (s < 2)
-        s = 2;
-
-    if (seg_on(on, 'a'))
-    {
-        px[0] = x + s;      py[0] = y;
-        px[1] = x1 - s;     py[1] = y;
-        px[2] = x1 - 2 * s; py[2] = y + t;
-        px[3] = x + 2 * s;  py[3] = y + t;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'g'))
-    {
-        int yt = ym - t / 2;
-        px[0] = x + s;      py[0] = yt;
-        px[1] = x1 - s;     py[1] = yt;
-        px[2] = x1 - 2 * s; py[2] = yt + t;
-        px[3] = x + 2 * s;  py[3] = yt + t;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'd'))
-    {
-        int yt = y1 - t + 1;
-        px[0] = x + s;      py[0] = yt;
-        px[1] = x1 - s;     py[1] = yt;
-        px[2] = x1 - 2 * s; py[2] = yt + t;
-        px[3] = x + 2 * s;  py[3] = yt + t;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'f'))
-    {
-        px[0] = x;      py[0] = y + s;
-        px[1] = x + t;  py[1] = y + 2 * s;
-        px[2] = x + t;  py[2] = ym - s;
-        px[3] = x;      py[3] = ym;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'b'))
-    {
-        px[0] = xr;     py[0] = y + s;
-        px[1] = xr + t; py[1] = y + 2 * s;
-        px[2] = xr + t; py[2] = ym - s;
-        px[3] = xr;     py[3] = ym;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'e'))
-    {
-        px[0] = x;      py[0] = ym + s;
-        px[1] = x + t;  py[1] = ym + 2 * s;
-        px[2] = x + t;  py[2] = y1 - s;
-        px[3] = x;      py[3] = y1;
-        fill_quad(scr, wp, ht, px, py);
-    }
-    if (seg_on(on, 'c'))
-    {
-        px[0] = xr;     py[0] = ym + s;
-        px[1] = xr + t; py[1] = ym + 2 * s;
-        px[2] = xr + t; py[2] = y1 - s;
-        px[3] = xr;     py[3] = y1;
-        fill_quad(scr, wp, ht, px, py);
-    }
-}
-
-static void draw_colon(uint8_t *scr, int wp, int ht, int x, int y, int h, int t)
-{
-    int cx = x + (CLOCK_COLON_W - t) / 2;
-    int cy[2];
-    int i, px[4], py[4];
-
-    cy[0] = y + h * 30 / 100;
-    cy[1] = y + h * 68 / 100;
-
-    for (i = 0; i < 2; i++)
-    {
-        px[0] = cx;         py[0] = cy[i];
-        px[1] = cx + t;     py[1] = cy[i];
-        px[2] = cx + t;     py[2] = cy[i] + t;
-        px[3] = cx;         py[3] = cy[i] + t;
-        fill_quad(scr, wp, ht, px, py);
-    }
 }
 
 void epd_clock(uint8_t *scr, int wp, int ht, const char *s)
 {
-    int t = CLOCK_STROKE;
     int i;
 
-    /* Fixed slots: slot i is at the same x for every rendering, so a '1' in the
-     * minutes cannot shift the hour digits.  That is what keeps the per-minute
-     * gate window down to the last two slots - see epd_layout.h. */
+    /* Fixed slots: slot i is at the same x for every rendering, so a '1' in
+     * the minutes cannot shift the hour digits.  That is what keeps the
+     * per-minute gate window down to the two minute slots - epd_layout.h.
+     * DSEG14's own advance is the same for all ten digits, asserted by
+     * font_dseg.h, so the slots and the font agree. */
     for (i = 0; s[i]; i++)
     {
-        int x = CLOCK_SLOT_X(i);
+        const DSEG_Glyph *g = dseg_find(s[i]);
+        int x, y, sx, sy, oy;
 
-        if (s[i] == ':')
-            draw_colon(scr, wp, ht, x, CLOCK_Y, CLOCK_H, t);
-        else if (s[i] >= '0' && s[i] <= '9')
-            draw_digit(scr, wp, ht, x, CLOCK_Y, CLOCK_CELL_W, CLOCK_H, t, s[i]);
+        if (!g)
+            continue;
+
+        /* the glyph's ink origin: the font's baseline sits CLOCK_H below the
+         * slot top, and a glyph of height h starts (DSEG_FONT_HEIGHT - h)
+         * scaled pixels above its own ink */
+        x = CLOCK_SLOT_X(i) + ((int) g->xo * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN;
+        y = CLOCK_Y + ((DSEG_FONT_HEIGHT - g->h) * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN;
+
+        oy = 0;
+        for (sy = 0; sy < g->h; sy++)
+        {
+            int rh = (sy & 1) ? 1 : 2;   /* the 3/2 pattern: 2,1,2,1 ... */
+            int ox = 0;
+
+            for (sx = 0; sx < g->w; sx++)
+            {
+                int rw = (sx & 1) ? 1 : 2;
+                int bit = g->off * 8 + sy * g->w + sx;
+
+                if (DSEG_BITS[bit >> 3] & (0x80 >> (bit & 7)))
+                {
+                    int a, b;
+                    for (a = 0; a < rh; a++)
+                        for (b = 0; b < rw; b++)
+                            plot(scr, wp, ht, x + ox + b, y + oy + a);
+                }
+                ox += rw;
+            }
+            oy += rh;
+        }
     }
 }

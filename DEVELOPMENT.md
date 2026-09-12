@@ -87,7 +87,7 @@ nowa213/
 ```powershell
 cd atc1441_src/Firmware
 python build_firmware.py
-# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v14.0 实测 82460 字节）
+# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v14.2 实测 82868 字节）
 ```
 
 ### ⚠️ 编译后必须做 SRAM 自检
@@ -98,7 +98,7 @@ TLSR8359 只有 **64KB SRAM**，栈顶固定在 `0x850000`。`boot.link` **无�
 ```powershell
 cd atc1441_src/Firmware
 ./tc32_windows/bin/tc32-elf-nm.exe out/ATC_Paper.elf | grep _end_bss_
-# 必须 < 0x850000（v14.0 实测 0x84efa1，余量 4191 字节）
+# 必须 < 0x850000（v14.2 实测 0x84efa1，余量 4191 字节）
 ```
 
 **加任何全局/静态大数组前，先算 SRAM 占用。** 用户图当初用 5KB RAM 缓冲即踩此坑，
