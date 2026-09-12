@@ -194,10 +194,13 @@ void epd_clock(uint8_t *scr, int wp, int ht, const char *s)
             continue;
 
         /* the glyph's ink origin: the font's baseline sits CLOCK_H below the
-         * slot top, and a glyph of height h starts (DSEG_FONT_HEIGHT - h)
-         * scaled pixels above its own ink */
+         * slot top, and yo is the ink top's offset FROM that baseline (GFX
+         * convention, negative = up), so the ink starts (DSEG_FONT_HEIGHT +
+         * yo) font px below the slot top.  Using the glyph height here
+         * instead - as this once did - puts every glyph whose ink stops
+         * short of the baseline (the colon, the '7') one inset too low. */
         x = CLOCK_SLOT_X(i) + ((int) g->xo * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN;
-        y = CLOCK_Y + ((DSEG_FONT_HEIGHT - g->h) * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN;
+        y = CLOCK_Y + ((DSEG_FONT_HEIGHT + (int) g->yo) * CLOCK_SCALE_NUM) / CLOCK_SCALE_DEN;
 
         oy = 0;
         for (sy = 0; sy < g->h; sy++)

@@ -615,15 +615,51 @@ def emit_dseg(path):
     if missing:
         raise SystemExit('DSEG14 upstream header has no glyph for %r' % missing)
 
+    # '1' and '4' are the only digits whose ink stops short of the em both top
+    # and bottom (34 of 40 rows, 3 px of inset each way).  Left alone they read
+    # as visibly shorter than their neighbours once scaled - the user saw it on
+    # the bench - so they are stretched back to the full em here, in the
+    # GENERATED data, where the fix costs the runtime nothing.  All-vertical
+    # strokes mean a vertical stretch cannot distort them; the '4's middle bar
+    # moves down proportionally, which is what a full-height '4' does anyway.
+    FULL_H = tab['0'][2]
+
+    def stretch_full(src_off, gw, gh):
+        """Re-encode a glyph vertically stretched to the em height.
+
+        Same bitstream convention as the source: MSB first, `gw` bits per
+        row, rows packed continuously, zero-padded to the byte boundary the
+        next glyph starts on."""
+        vals = []
+        for y in range(FULL_H):
+            r = y * gh // FULL_H          # nearest-neighbour row map
+            for cx in range(gw):
+                biti = src_off * 8 + r * gw + cx
+                vals.append(1 if bits[biti >> 3] & (0x80 >> (biti & 7)) else 0)
+        out = bytearray()
+        for i in range(0, len(vals), 8):
+            byte = 0
+            for v in vals[i:i + 8]:
+                byte = (byte << 1) | v
+            if len(vals) - i < 8:
+                byte <<= 8 - (len(vals) - i)
+            out.append(byte)
+        return out
+
     # re-pack the wanted glyphs contiguously and measure the per-cell ink span
     # the ten digits cover, which is what the fixed-slot layout is derived from
     out_bits = bytearray()
     glyphs, ink_x0, ink_x1 = [], None, None
     for ch in DSEG_CHARS:
         off, w, h, adv, xo, yo = tab[ch]
-        nbytes = (w * h + 7) // 8
+        if ch in '14' and (h, yo) != (FULL_H, -FULL_H):
+            data = stretch_full(off, w, h)
+            h, yo = FULL_H, -FULL_H
+        else:
+            nbytes = (w * h + 7) // 8
+            data = bits[off:off + nbytes]
         glyphs.append((ch, len(out_bits), w, h, adv, xo, yo))
-        out_bits += bits[off:off + nbytes]
+        out_bits += data
         if ch != ':':
             ink_x0 = xo if ink_x0 is None else min(ink_x0, xo)
             ink_x1 = xo + w - 1 if ink_x1 is None else max(ink_x1, xo + w - 1)

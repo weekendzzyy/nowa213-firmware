@@ -378,7 +378,7 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
      * three uint16_t into the caller's stack frame. */
     uint16_t r1[ROW1_MAX_CHARS], r3[CAL_ROW3_MAX];
     char b[20];
-    int n, x, y, m, d, wd;
+    int n, x, sp, y, m, d, wd;
 
     /* Clamp to what the hardware can produce, so the composed line cannot grow
      * past the width epd_layout.h reserved for it.  See the row-1 block there
@@ -390,7 +390,7 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
     else if (temperature > ROW1_TEMP_MAX)
         temperature = ROW1_TEMP_MAX;
 
-    /* ---- row 1: 2026年9月12日 周六 31℃ 2905mV ---- */
+    /* ---- row 1: 2026年9月12日 周六 31℃ ..... 2905mV (right aligned) ---- */
     cal_date(t, &y, &m, &d, &wd);
     n = 0;
     n = put_num(r1, n, y);
@@ -402,15 +402,26 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
     r1[n++] = ' ';
     r1[n++] = UF_C_WEEK;
     r1[n++] = UF_WEEKDAY[wd];
+    sp = n;                     /* the space before the temperature */
     r1[n++] = ' ';
     n = put_num(r1, n, temperature);
     r1[n++] = UF_C_DEGC;
-    r1[n++] = ' ';
-    n = put_num(r1, n, mv);
-    r1[n++] = 'm';
-    r1[n++] = 'V';
     r1[n] = 0;
+
+    /* The voltage is right aligned on ROW1_RIGHT_X - the edge row 3's name
+     * and version align to - so its position does not drift with the date's
+     * length.  The widest clamped date would reach it (epd_layout.h), and the
+     * only thing that can give is the space before the temperature: drop it
+     * when the left part would run into the voltage. */
+    sprintf(b, "%umV", mv);
+    x = ROW1_RIGHT_X - epd_text_width(b);
+    if (ROW1_X + epd_utext_width(r1) > x)
+    {
+        memmove(&r1[sp], &r1[sp + 1], (n - sp) * sizeof r1[0]);
+        n--;
+    }
     epd_utext(scr, wp, ht, ROW1_X, ROW1_Y, r1);
+    epd_text(scr, wp, ht, x, ROW1_Y, b);
 
     /* ---- row 2: the clock ---- */
     sprintf(b, "%02d:%02d", (int)((t / 60) / 60) % 24, (int)(t / 60) % 60);

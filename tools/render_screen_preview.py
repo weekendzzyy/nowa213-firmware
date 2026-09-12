@@ -243,9 +243,11 @@ def main():
     print('face: %s %s  %d C  %d mV   partial window %d..%d (%d gates, %.0f%%)'
           % (args.date, hhmm, args.temp, args.mv, L['EPD_WIN_GATE_FIRST'],
              L['EPD_WIN_GATE_LAST'], L['EPD_WIN_GATES'], L['EPD_WIN_GATES'] * 100.0 / 296))
-    print('row 1: %s   (%d px, ends at %d of %d)'
+    print('row 1: %s   (%d px, ends at %d) + "%dmV" right aligned at %d..%d'
           % (''.join(chr(c) for c in rows1), face.utext_width(rows1),
-             L['ROW1_X'] + face.utext_width(rows1), W))
+             L['ROW1_X'] + face.utext_width(rows1),
+             min(args.mv, L['ROW1_MV_MAX']), face.row1_mv_x(args.mv),
+             L['ROW1_RIGHT_X'] - 1))
     rx = face.row3_rune_x()
     shown = face.row3_text(t, mac)
     bx = face.row3_right_x(shown)

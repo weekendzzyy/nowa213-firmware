@@ -462,8 +462,11 @@ class Face(object):
         """Mirror of epd_clock()'s glyph loop.
 
         (x, y) is the slot origin: the font's baseline sits CLOCK_H below it,
-        and a glyph of height h starts (DSEG_FONT_HEIGHT - h) scaled pixels
-        above its own ink - so all ten digits share one baseline.
+        and yo is the ink top's offset FROM that baseline (GFX convention,
+        negative = up) - so the ink starts (DSEG_FONT_HEIGHT + yo) scaled
+        pixels below the slot top.  Same formula as epd_font.c, which replaced
+        an earlier (FONT_HEIGHT - h) version that sat short glyphs one inset
+        too low.
         """
         g = self._dseg(ch)
         if g is None:
@@ -471,7 +474,7 @@ class Face(object):
         off, gw, gh, adv, xo, yo = g[:6]
         num, den = self.L['CLOCK_SCALE_NUM'], self.L['CLOCK_SCALE_DEN']
         x += (xo * num) // den
-        y += ((self.L['DSEG_FONT_HEIGHT'] - gh) * num) // den
+        y += ((self.L['DSEG_FONT_HEIGHT'] + yo) * num) // den
         bit = off * 8
         bits = self.dseg_bits
         oy = 0
@@ -665,8 +668,16 @@ class Face(object):
         return n
 
     def row1(self, t, mv, temperature):
-        """The row-1 codepoints, exactly as epd_face composes them - including
-        the clamps, so this is also the function the width check must use.
+        """The LEFT part of row 1 - date, weekday, temperature - exactly as
+        epd_face composes it, clamps included, so this is also the function
+        the width check must use.
+
+        The voltage is NOT part of this string any more: it is drawn right
+        aligned on ROW1_RIGHT_X (row1_mv_x), the edge row 3's name/version
+        share, so it does not drift with the date's length.  The widest
+        clamped date would run into it, so the space before the temperature
+        is dropped when that would happen - the same rule epd_face applies,
+        and check_row1 proves it is enough for every combination.
 
         Composed into an Arr sized by ROW1_MAX_CHARS: if a field widens past
         what epd_layout.h reserved, this raises here rather than corrupting a
@@ -686,14 +697,20 @@ class Face(object):
         buf[n] = ord(' '); n += 1
         buf[n] = self.ch['UF_C_WEEK']; n += 1
         buf[n] = self.weekday[wd]; n += 1
+        sp = n
         buf[n] = ord(' '); n += 1
         n = self.put_num(buf, n, temperature)
         buf[n] = self.ch['UF_C_DEGC']; n += 1
-        buf[n] = ord(' '); n += 1
-        n = self.put_num(buf, n, mv)
-        buf[n] = ord('m'); n += 1
-        buf[n] = ord('V'); n += 1
+        if L['ROW1_X'] + self.utext_width(buf.slice(n)) > self.row1_mv_x(mv):
+            for i in range(sp, n - 1):   # the mirror of epd_face's memmove
+                buf[i] = buf[i + 1]
+            n -= 1
         return buf.slice(n)
+
+    def row1_mv_x(self, mv):
+        """x of the right-aligned voltage: ROW1_RIGHT_X minus its advance."""
+        mv = min(mv, self.L['ROW1_MV_MAX'])
+        return self.L['ROW1_RIGHT_X'] - self.text_width('%dmV' % mv)
 
     def row3(self, t):
         """The row-3 codepoints, or [] when the date is outside the range.
@@ -774,6 +791,8 @@ class Face(object):
 
         self.utext(buf, wpitch, height, L['ROW1_X'], L['ROW1_Y'],
                    self.row1(t, mv, temperature))
+        self.text(buf, wpitch, height, self.row1_mv_x(mv), L['ROW1_Y'],
+                  '%dmV' % min(mv, L['ROW1_MV_MAX']))
 
         hhmm = '%02d:%02d' % ((t // 60 // 60) % 24, (t // 60) % 60)
         self.clock(buf, wpitch, height, hhmm)

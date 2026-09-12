@@ -24,10 +24,13 @@
 #define FACE_VISIBLE_H  122
 
 /* ---- row 1: "2026年9月12日 周六 31℃ 2905mV" ----------------------------
- * Left aligned, and the ONLY row that can grow: every other row has a fixed
- * shape.  So the fields are clamped to what the hardware can actually produce,
- * which makes the widest string a known, reachable worst case instead of a
- * guess, and lets the buffer below be sized exactly.
+ * Composed as TWO strings: the date/weekday/temperature on the left at
+ * ROW1_X, and the voltage right aligned on ROW1_RIGHT_X - the same edge row
+ * 3's name/version align to, so the face has one right margin and the voltage
+ * does not drift left and right with the date's length.  The left part is the
+ * only part that can grow, so its fields are clamped to what the hardware can
+ * actually produce, which makes the widest string a known, reachable worst
+ * case instead of a guess, and lets the buffer below be sized exactly.
  *
  *   year       4 digits for any timestamp this RTC will ever hold
  *   month/day  1 or 2 digits
@@ -36,27 +39,40 @@
  *   battery     a 12-bit ADC on a 3.6 V part cannot exceed 4 digits; the clamp
  *               is there so a stuck-high reading cannot wrap the line
  *
- * Worst case is therefore "2026年12月31日 周六 -40℃ 9999mV":
- *   26 codepoints and 242 px of advance, which ends at x=244 of 250.
- * tools/verify_v14_layout.py walks every day of the supported range and fails
- * if either number below stops being the true maximum.
+ * Left-part worst case is therefore "2026年10月10日 周日 -40℃": 19 codepoints
+ * and 188 px of advance.  Against the widest voltage ("9999mV", 48 px) right
+ * aligned on 231 - pen start 183 - that would overlap, so epd_face() drops the
+ * space before the temperature when it would (188 -> 182 px of advance: the
+ * space is worth 6, not 8 - measured, not assumed), and ROW1_X is 1, not 2, so
+ * the dropped form ends at exactly the voltage's pen start.  That combination
+ * is a sub-zero cold snap with a four-digit battery reading and a two-digit
+ * month AND day - unreachable indoors - but tools/verify_v14_layout.py walks
+ * every day of the supported range times every clamped temperature and
+ * voltage, and fails if the rule ever stops being enough.
  */
-#define ROW1_Y  2
-#define ROW1_X  2
+#define ROW1_Y        2
+#define ROW1_X        1
+#define ROW1_RIGHT_X  231
 
 #define ROW1_MV_MAX    9999
 #define ROW1_TEMP_MIN  (-40)
 #define ROW1_TEMP_MAX  85
 
-/* buffer capacity for the composed row, in codepoints: 26 + NUL.  v14.0 began
- * life with 24, which the widest string overran by three uint16_t. */
-#define ROW1_MAX_CHARS 27
-/* ... and the advance it costs, so the fit can be asserted at compile time as
- * well as in the verify script (which re-derives it from the real glyphs). */
-#define ROW1_MAX_ADV   242
+/* Buffer capacity for the composed LEFT part, in codepoints: 19 + NUL.  (A
+ * 19-codepoint left part is exactly the one that trips the space-drop rule
+ * above when the voltage is four digits - but with a shorter voltage it is
+ * drawn complete, so 19 is the capacity the buffer needs.) */
+#define ROW1_MAX_CHARS 20
+/* The advance the left part can cost: 188 before the space-drop rule, 182
+ * after it.  The compile-time assertion below checks the DROPPED advance
+ * against the WIDEST voltage - the one combination with no slack; the verify
+ * script re-derives both numbers from the real glyphs and walks everything. */
+#define ROW1_MV_ADV    48    /* "9999mV" - 6 ASCII glyphs at 8 px */
+#define ROW1_MAX_ADV   188
+#define ROW1_DROP_ADV  182
 
-#if ROW1_X + ROW1_MAX_ADV > FACE_W
-#error "row 1: the widest date no longer fits across the glass - see the block above"
+#if ROW1_X + ROW1_DROP_ADV + ROW1_MV_ADV - 1 > ROW1_RIGHT_X
+#error "row 1: the widest left part would run into the right-aligned voltage"
 #endif
 
 /* ---- row 3: lunar date + next solar term, and the BLE state ------------
@@ -107,6 +123,9 @@
 #endif
 #if ROW3_RIGHT_X + 1 > FACE_W
 #error "row 3: the right corner runs off the glass"
+#endif
+#if ROW1_RIGHT_X != ROW3_RIGHT_X
+#error "row 1 and row 3 must share one right edge, or the face looks ragged"
 #endif
 
 /* ---- row 2: the clock -------------------------------------------------

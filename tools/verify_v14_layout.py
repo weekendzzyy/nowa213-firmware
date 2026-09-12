@@ -303,18 +303,14 @@ def check_window(face, rep, cells, union):
             % (dbg, dbg_end, band[0], band[0] - dbg_end))
 
     # The other half of the same argument: row 1's voltage DOES fall in the band,
-    # which is why app.c has to freeze it.  Use the shortest the suffix can get
-    # (a 1-digit mV reading) so this stays true for every reading.
-    cps = face.row1(ts(2026, 9, 12, 12, 0), 0, 31)
-    x, xs = L['ROW1_X'], []
-    for cp in cps:
-        xs.append(x)
-        x += face.uf_find(cp)[2]
-    mv_x = xs[-2]                                    # the 'm' of the unit
-    rep.chk(band[0] <= mv_x <= band[1],
-            'row 1\'s voltage does fall in the band - so it must be frozen',
-            '"...mV" starts at %d, band is %d..%d'
-            % (mv_x, band[0], band[1]))
+    # which is why app.c has to freeze it.  Use the LONGEST reading ("9999mV"),
+    # whose start is the leftmost the voltage can ever sit at.
+    mv_x = face.row1_mv_x(L['ROW1_MV_MAX'])
+    mv_end = mv_x + face.text_width('9999mV') - 1
+    rep.chk(band[0] <= mv_x and mv_end <= band[1],
+            "row 1's voltage sits inside the band - so it must be frozen",
+            '"9999mV" spans %d..%d, band is %d..%d'
+            % (mv_x, mv_end, band[0], band[1]))
     return union
 
 
@@ -344,9 +340,10 @@ def check_row1(face, rep):
     temps = [L['ROW1_TEMP_MIN'], -10, -9, -1, 0, 9, 10, 85, L['ROW1_TEMP_MAX']]
     mvs = [0, 9, 999, 1000, 2905, L['ROW1_MV_MAX']]
     overflow = []
-    too_wide = []
     too_long = []
+    collisions = []
     worst = (0, None)
+    worst_cp = 0
 
     for y, m, d in days():
         t = ts(y, m, d, 12, 0)
@@ -360,33 +357,54 @@ def check_row1(face, rep):
                     continue
                 if len(cps) > L['ROW1_MAX_CHARS'] - 1:
                     too_long.append((y, m, d, temp, mv, len(cps)))
+                worst_cp = max(worst_cp, len(cps))
                 w = face.utext_width(cps)
-                if L['ROW1_X'] + w > L['FACE_W']:
-                    too_wide.append((y, m, d, temp, mv, w))
                 if w > worst[0]:
                     worst = (w, ''.join(chr(c) for c in cps))
+                mv_x = face.row1_mv_x(mv)
+                if L['ROW1_X'] + w > mv_x:
+                    collisions.append(('%04d-%02d-%02d %dC %dmV'
+                                       % (y, m, d, temp, mv),
+                                       L['ROW1_X'] + w, mv_x))
 
-    checked = len(temps) * len(mvs)
     rep.note('walked every day of %04d-%02d-%02d..%04d-%02d-%02d x %d x %d = %d strings'
              % (DAY_FIRST + DAY_LAST + (len(temps), len(mvs),
-                                        sum(1 for _ in days()) * checked)))
-    rep.chk(not overflow, 'the row-1 buffer holds the widest string (no overrun)',
+                                        sum(1 for _ in days()) * len(temps) * len(mvs))))
+    rep.chk(not overflow, 'the row-1 buffer holds the widest left part (no overrun)',
             'ROW1_MAX_CHARS %d' % L['ROW1_MAX_CHARS'])
     if overflow:
         rep.note('e.g. %s -> %s' % overflow[0])
-    rep.chk(not too_long, 'no string needs more codepoints than the buffer has',
-            'max %d, capacity %d' % (len(face.row1(ts(2050, 12, 26), 9999, -40)),
-                                     L['ROW1_MAX_CHARS'] - 1))
-    rep.chk(not too_wide, 'the widest string still fits across the glass',
-            'ends at x=%d of %d' % (L['ROW1_X'] + worst[0], L['FACE_W']))
-    rep.note('widest: %s  (%d px)' % (worst[1], worst[0]))
+    rep.chk(not too_long, 'no left part needs more codepoints than the buffer has',
+            'max %d, capacity %d' % (worst_cp, L['ROW1_MAX_CHARS'] - 1))
+    rep.chk(not collisions,
+            'the left part never runs into the right-aligned voltage',
+            'the space-drop rule of epd_layout.h is enough')
+    if collisions:
+        rep.note('e.g. %s' % (collisions[0],))
     rep.chk(worst[0] == L['ROW1_MAX_ADV'],
-            'ROW1_MAX_ADV is the true maximum, not a guess',
+            'ROW1_MAX_ADV is the true maximum after the space-drop rule',
             'measured %d, declared %d' % (worst[0], L['ROW1_MAX_ADV']))
+    rep.chk(worst_cp == L['ROW1_MAX_CHARS'] - 1,
+            'ROW1_MAX_CHARS is the true maximum',
+            'measured %d, declared %d' % (worst_cp, L['ROW1_MAX_CHARS'] - 1))
+    rep.note('widest: %s  (%d px)' % (worst[1], worst[0]))
 
-    rep.note('clamps: temperature %d..%d, voltage <= %d'
-             % (L['ROW1_TEMP_MIN'], L['ROW1_TEMP_MAX'], L['ROW1_MV_MAX']))
-    return worst
+    # the voltage is right aligned on ROW1_RIGHT_X, the SAME edge as row 3's
+    # name/version - that alignment is the whole point of this layout change
+    ok = all(face.row1_mv_x(mv) + face.text_width('%dmV' % min(mv, L['ROW1_MV_MAX']))
+             == L['ROW1_RIGHT_X'] for mv in mvs)
+    rep.chk(ok and L['ROW1_RIGHT_X'] == L['ROW3_RIGHT_X'],
+            "the voltage shares row 3's right edge, for every reading",
+            'ROW1_RIGHT_X %d, ROW3_RIGHT_X %d'
+            % (L['ROW1_RIGHT_X'], L['ROW3_RIGHT_X']))
+
+    # ... and the firmware really implements this - the mirror alone would not
+    # put it on the tag
+    src = _read('epd.c')
+    rep.chk('ROW1_RIGHT_X - epd_text_width(b)' in src,
+            'epd.c right-aligns the voltage on ROW1_RIGHT_X', '')
+    rep.chk('epd_utext_width(r1) > x' in src and 'memmove' in src,
+            'epd.c drops the space before the temperature on collision', '')
 
 
 # ---------------------------------------------------------------------------
@@ -799,10 +817,10 @@ def check_falsification(face, rep, cells, union, row3_worst):
     finally:
         Face.draw_dseg = orig
 
-    # (b) the row-1 buffer at its original 24 entries
+    # (b) the row-1 buffer one entry short of the true maximum
     need = len(face.row1(ts(2050, 12, 26, 12, 0), 9999, -40))
     saved = L.obj.get('ROW1_MAX_CHARS')
-    L.obj['ROW1_MAX_CHARS'] = '24'
+    L.obj['ROW1_MAX_CHARS'] = str(need - 1)
     L._cache.pop(('ROW1_MAX_CHARS',), None)
     try:
         try:
@@ -810,8 +828,8 @@ def check_falsification(face, rep, cells, union, row3_worst):
             raised = False
         except IndexError:
             raised = True
-        rep.chk(raised, 'the original 24-entry row-1 buffer overruns, and says so',
-                'the widest string needs %d codepoints' % need)
+        rep.chk(raised, 'a row-1 buffer one entry short overruns, and says so',
+                'the widest left part needs %d codepoints' % need)
     finally:
         L.obj['ROW1_MAX_CHARS'] = saved
         L._cache.pop(('ROW1_MAX_CHARS',), None)
