@@ -75,17 +75,30 @@ static const uint8_t BLE_ICON_BITS[BLE_ICON_H] = {
 
 // ---- v12.0: on-glass forensics for the "full refresh every few minutes" bug --
 // Four counters owned by app.c (see the v12.0 block there) are drawn next to
-// the temperature as "H0 T0 B0 L0".  H = the hour changed, and one per hour is
-// the DESIGNED full refresh; T = the panel temperature left its dead band;
-// B = the battery voltage left its dead band; L = the BLE connect state
-// flipped.  They saturate at 9, so the widest string is 11 glyphs = 107 px.
+// the temperature.  H = the hour changed, and one per hour is the DESIGNED full
+// refresh; T = the panel temperature left its dead band; B = the battery
+// voltage left its dead band; L = the BLE connect state flipped.
+//
+// They answered the question.  After nearly a day the glass read H9(saturated)
+// T0 B1 L2: over ~20 hours that is the hourly refresh plus one battery step and
+// one BLE flip, and the temperature dead band has not fired once since v11.0.
+// The "black/white/black every 1-5 minutes" the tag used to do is gone.
+//
+// v13.0: OFF in the release build.  The tally in app.c is deliberately left in
+// place so that re-arming is this one line; it costs a few instructions per
+// full refresh and cannot change WHEN the panel is driven.
 //
 // Geometry (derived, see tools/verify_refresh_debug.py): the temperature "24'C"
 // in Special_Elite_Regular_30 at x=10 has ink x 10..71, so x=84 leaves a clean
 // gap, and the whole string stays inside the per-minute gate window (glass
-// x 54..190) so it is repainted on every tick.  Set EPD_USE_REFRESH_DEBUG to 0
-// to take it off the glass again - no other code depends on it.
-#define EPD_USE_REFRESH_DEBUG 1
+// x 54..190) so it is repainted on every tick.
+//
+// The separators went away in v13.0.  H has to survive a whole day and so needs
+// two digits, but that is what it takes to fit the window: "H99T9B9L9" is 99 px
+// and ends at x=183, whereas putting the spaces back makes it 117 px and ends
+// at x=201 - outside the window, where a per-minute refresh would leave it
+// stale.  The letters separate the fields well enough on their own.
+#define EPD_USE_REFRESH_DEBUG 0
 #define EPD_DEBUG_X 84
 #define EPD_DEBUG_Y 95
 
@@ -452,7 +465,7 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     obdWriteStringCustom(&obd, (GFXfont *)&Special_Elite_Regular_30, 10, 95, (char *)buff, 1);
 #if EPD_USE_REFRESH_DEBUG
     // v12.0: why the full refreshes are happening - see the define above.
-    sprintf(buff, "H%d T%d B%d L%d", dbg_hour, dbg_temp, dbg_batt, dbg_ble);
+    sprintf(buff, "H%02dT%dB%dL%d", dbg_hour, dbg_temp, dbg_batt, dbg_ble);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, EPD_DEBUG_X, EPD_DEBUG_Y, (char *)buff, 1);
 #endif
     sprintf(buff, "Battery %dmV", battery_mv);

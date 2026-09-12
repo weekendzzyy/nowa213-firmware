@@ -59,7 +59,8 @@ nowa213/
 │   ├── gen_test_image.py     # 非对称测试图（验方向 / 裁切）
 │   ├── list_ports.py         # 枚举 COM 口
 │   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
-│   └── verify_*.py           # 7 个几何 / 协议断言脚本
+│   │                            #   --with-debug 连诊断计数器一起画出来
+│   └── verify_*.py           # 7 个几何 / 协议断言脚本（动过驱动或 UI 就全跑）
 ├── web_flasher.html          # 浏览器 WebBLE 刷机
 └── web_uploader.html         # 浏览器 WebBLE 传图 + 对时
 ```
@@ -79,7 +80,7 @@ nowa213/
 ```powershell
 cd atc1441_src/Firmware
 python build_firmware.py
-# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v12.0 实测 91276 字节）
+# 产物：out/ATC_Paper.elf  +  ATC_Paper.bin（含 CRC，v13.0 实测 91260 字节）
 ```
 
 ### ⚠️ 编译后必须做 SRAM 自检
@@ -90,7 +91,7 @@ TLSR8359 只有 **64KB SRAM**，栈顶固定在 `0x850000`。`boot.link` **无�
 ```powershell
 cd atc1441_src/Firmware
 ./tc32_windows/bin/tc32-elf-nm.exe out/ATC_Paper.elf | grep _end_bss_
-# 必须 < 0x850000（v12.0 实测 0x84efb1，余量 ~4.1KB）
+# 必须 < 0x850000（v13.0 实测 0x84efb1，余量 ~4.1KB）
 ```
 
 **加任何全局/静态大数组前，先算 SRAM 占用。** 用户图当初用 5KB RAM 缓冲即踩此坑，
@@ -159,7 +160,7 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 | 电量换算 | `battery.c` → `get_battery_level()` | 测的是芯片 VDD，不是电池节点；窗口 2200→3100 mV |
 | BLE 指令 | `epd_ble_service.c` | opcode `0x00 <fill>` = memset 缓冲，`0x01` = 推送到屏 |
 | 版本号 | `app_config.h` → `FW_VERSION_STRING` | 改了要同步 `epd.c` 的 `EPD_VERSION_X`（右对齐，`verify_version_badge.py` 会抓） |
-| 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v12.0 临时诊断，问题定位后把宏置 0 摘除 |
+| 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v13.0 起出厂关闭（`0`）。计数逻辑**保留**，改回 `1` 重新编译即重新武装。**别把 `H` 的上限调回 9** —— 一天 18 次整点必然撞顶，`verify_refresh_debug.py` 会直接 FAIL |
 
 > ⚠️ **改任何驱动代码前，先确认哪个文件在跑。** 屏幕左上角自报 `ESL_xxxxxx BWR213`
 > ⇒ `epd_model == 2` ⇒ 执行 `epd_bwr_213.c`（SSD1680 族）。`epd_bw_213.c`
@@ -257,7 +258,8 @@ git tag -a v2.1 -m "..."
 | 读回零星 `0xFF` | 读回瞬断（非真写入） | 重刷一次再读回即 MATCH |
 | **改了驱动但行为没变** | 改到了兜底驱动 `epd_bw_213.c`，本机不执行 | 先读屏幕型号串确认 `epd_model`，改 `epd_bwr_213.c`（v6.0 踩过）|
 | **时钟走时偏慢** | `handler_time()` 用 `if`，每次调用最多 +1 秒，速率被主循环频率钳制 | 改 `while` 追补（v9.0）；主循环每圈都会睡，别假设调用频率 |
-| **每隔几分钟整屏闪、间隔还不固定** | 拿传感器读数做 `!=` 比较去触发全刷；温度 1℃ 量化，室温落在两步之间时会来回跳 | 加死区（v11.0）。仍然无效 ⇒ 把各触发源计数器画到屏上定位（v12.0），别在纸面上继续推演 |
+| **每隔几分钟整屏闪、间隔还不固定** | 拿传感器读数做 `!=` 比较去触发全刷；温度 1℃ 量化，室温落在两步之间时会来回跳 | **已结案**：加死区（v11.0）即为正解，实测一天 `T=0`、全刷从 ~500 次降到 ~21 次（v13.0）。查不动时把各触发源计数器画到屏上定位（v12.0），别在纸面上继续推演 |
+| **屏上诊断计数器只显示一位、很快就顶格** | 计数上限按"版面能放几位"倒推，而非按"事件在观察窗口内的预期次数" | 上限要够撑过整个观察期（`H` 一天 18 次 ⇒ 需两位）；`verify_refresh_debug.py` 已加断言拦住这个错 |
 | **反汇编搜不到某全局变量的地址** | TC32 用「基址寄存器 + 小偏移」寻址，只有基址进字面量池 | `nm` 取地址 → 找基址字面量 → 按差值反推偏移；直接 grep 全地址会**假阴性** |
 
 ---

@@ -18,13 +18,15 @@
 #   2  BLE rune (v11.0)        BLE_ICON_BITS[13] in epd.c  ( 233,   8)
 #   3  "HH:MM"                 DSEG14_Classic_Mini_...40   (  50,  65)
 #   4  "NN'C"                  Special_Elite_Regular_30    (  10,  95)
-#   4b "Hn Tn Bn Ln" (v12.0)   Dialog_plain_16             (EPD_DEBUG_X, 95)
+#   4b "HnnTnBnLn" (v12.0)    Dialog_plain_16             (EPD_DEBUG_X, 95)
+#      the counters are OFF the glass in v13.0 - --with-debug draws them anyway
 #   5  "Battery NNNNmV"        Dialog_plain_16             (  10, 120)
 #   6  FW_VERSION_STRING       Dialog_plain_16             (EPD_VERSION_X, 120)
 #
 # Usage:
-#   python tools/render_screen_preview.py                  # v12.0 default
+#   python tools/render_screen_preview.py                  # v13.0 default
 #   python tools/render_screen_preview.py --no-badge       # what v9.0 looked like
+#   python tools/render_screen_preview.py --with-debug     # show the counters
 #   python tools/render_screen_preview.py --zoom 4
 # =============================================================================
 import argparse
@@ -130,13 +132,30 @@ def draw_ble_icon(px, x, y, w, h, rows):
                     px[cy * VDISP_W + cx] = 1
 
 
+def load_debug_sample():
+    """The on-glass refresh counters as they read at boot, parsed out of epd.c.
+
+    The format string lives in the firmware, so widening a counter there (v13.0
+    gave H two digits) is reflected here with no second copy to keep in sync.
+    Picked by arity - the one sprintf with a slot per counter - exactly like
+    tools/verify_refresh_debug.py does, so reordering the draws cannot fool it.
+    """
+    text = open(os.path.join(SRC, 'epd.c'), encoding='utf-8', errors='ignore').read()
+    for m in re.finditer(r'sprintf\(buff,\s*"([^"]*)"\s*,([^;]*?)\);', text):
+        fmt = m.group(1)
+        if len(re.findall(r'%\d*d', fmt)) == 4:
+            return re.sub(r'%(\d*)d',
+                          lambda mm: '0'.rjust(int(mm.group(1) or 1), '0'), fmt)
+    return 'H00T0B0L0'
+
+
 def read_define(path, name, default=None):
     text = open(os.path.join(SRC, path), encoding='utf-8', errors='ignore').read()
     m = re.search(r'#define\s+%s\s+"?([^"\n]+)"?' % name, text)
     return m.group(1).strip() if m else default
 
 
-def render(with_badge=True, with_ble=True):
+def render(with_badge=True, with_ble=True, with_debug=None):
     g16 = load_font('font16.h', 'Dialog_plain_16')
     g30 = load_font('font30.h', 'Special_Elite_Regular_30')
     g60 = load_font('font_60.h', 'DSEG14_Classic_Mini_Regular_40')
@@ -149,11 +168,17 @@ def render(with_badge=True, with_ble=True):
     # icon there is reflected here with no second place to keep in sync.
     bx, by, bw, bh, brows = load_ble_icon()
     use_icon = read_define('epd.c', 'EPD_USE_BLE_ICON', '1') == '1'
-    # v12.0 forensics: the four full-refresh counters, off at boot (H0 T0 B0 L0).
-    # Position comes from epd.c so it tracks the firmware with no second copy.
+    # The four full-refresh counters, off at boot ("H00T0B0L0").  Their position
+    # and their format both come from epd.c, and v13.0 ships with the switch at
+    # 0 - so the preview shows a clean screen by default, and --with-debug draws
+    # the counters anyway to check the layout without rebuilding firmware.
     dx = int(read_define('epd.c', 'EPD_DEBUG_X', '84'))
     dy = int(read_define('epd.c', 'EPD_DEBUG_Y', '95'))
-    use_dbg = read_define('epd.c', 'EPD_USE_REFRESH_DEBUG', '0') == '1'
+    dbg_txt = load_debug_sample()
+    if with_debug is None:
+        use_dbg = read_define('epd.c', 'EPD_USE_REFRESH_DEBUG', '0') == '1'
+    else:
+        use_dbg = with_debug
 
     px = bytearray(VDISP_W * VDISP_H)
 
@@ -166,11 +191,12 @@ def render(with_badge=True, with_ble=True):
     draw_string(px, *g60, 50, 65, '14:23')                 # 3 clock
     draw_string(px, *g30, 10, 95, "25'C")                  # 4 temperature
     if use_dbg:
-        draw_string(px, *g16, dx, dy, 'H0 T0 B0 L0')       # 4b v12.0 forensics
+        draw_string(px, *g16, dx, dy, dbg_txt)             # 4b refresh counters
     draw_string(px, *g16, 10, 120, 'Battery 3600mV')       # 5 battery
     if with_badge:
         draw_string(px, *g16, vx, vy, ver)                 # 6 version badge
-    return px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg)
+    return (px, (vx, vy, ver), (bx, by, bw, bh, use_icon),
+            (dx, dy, use_dbg, dbg_txt))
 
 
 def to_image(px, zoom, glass_only=False):
@@ -190,13 +216,17 @@ def main():
     ap.add_argument('--no-ble', action='store_true',
                     help='render the disconnected state (no "B" indicator)')
     ap.add_argument('--zoom', type=int, default=3)
+    ap.add_argument('--with-debug', action='store_true',
+                    help='draw the H/T/B/L counters even though v13.0 ships '
+                         'with EPD_USE_REFRESH_DEBUG 0')
     args = ap.parse_args()
 
-    px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg) = render(
-        with_badge=not args.no_badge, with_ble=not args.no_ble)
+    px, (vx, vy, ver), (bx, by, bw, bh, use_icon), (dx, dy, use_dbg, dbg_txt) = render(
+        with_badge=not args.no_badge, with_ble=not args.no_ble,
+        with_debug=True if args.with_debug else None)
     os.makedirs(OUTDIR, exist_ok=True)
 
-    tag = 'v10' if args.no_badge else 'v12'
+    tag = 'v10' if args.no_badge else ('v13debug' if use_dbg else 'v13')
     main_png = os.path.join(OUTDIR, 'screen_%s_zoom%d.png' % (tag, args.zoom))
     to_image(px, args.zoom).save(main_png)
     print('wrote %s  (%dx%d)' % (main_png, VDISP_W * args.zoom, GLASS_H * args.zoom))
@@ -261,8 +291,11 @@ def main():
     else:
         print('ble indicator at x=%d y=%d  legacy letter "B"' % (bx, by))
     if use_dbg:
-        print('refresh counters at x=%d y=%d  "H0 T0 B0 L0" (boot state)'
-              % (dx, dy))
+        print('refresh counters at x=%d y=%d  "%s" (boot state)'
+              % (dx, dy, dbg_txt))
+    else:
+        print('refresh counters off the glass (EPD_USE_REFRESH_DEBUG 0); '
+              'would sit at x=%d y=%d as "%s" if re-armed' % (dx, dy, dbg_txt))
     return 0
 
 

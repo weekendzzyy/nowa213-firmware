@@ -1,29 +1,40 @@
 #!/usr/bin/env python3
 # =============================================================================
-# verify_refresh_debug.py - assert the v12.0 on-glass refresh counters are
-#                           enabled, readable, and COMPLETE
+# verify_refresh_debug.py - assert the on-glass refresh counters are readable,
+#                           COMPLETE, and still fit when re-armed
 # -----------------------------------------------------------------------------
-# v12.0 draws "H0 T0 B0 L0" next to the temperature, so one glance at the tag
-# says which of the four full-refresh causes fired.  Nothing is hard-coded
-# twice: the position and the format string are parsed out of epd.c, the counter
-# names out of app.c/epd.h, the font metrics out of font16.h/font30.h, and the
-# per-minute gate window out of verify_gate_window.py.
+# app.c counts the four things that can raise `full` (the hourly refresh, the
+# temperature dead band, the battery dead band, a BLE connect flip) and epd.c
+# draws them next to the temperature as "H09T0B1L2".  The switch is
+# EPD_USE_REFRESH_DEBUG: 1 = on the glass, 0 = off, which is what v13.0 ships.
+# The counters keep counting either way, so flipping the switch back is the
+# whole re-arm procedure - and that is exactly why this script has to keep
+# passing while the flag is 0.  Nothing is hard-coded twice: the position and
+# format string come out of epd.c, the counter names out of app.c/epd.h, the
+# saturation caps out of app.c's DBG_BUMP* macros, the font metrics out of
+# font16.h/font30.h, the night window out of app.c, and the per-minute gate
+# window out of verify_gate_window.py.
 #
 # Checks:
-#   1. EPD_USE_REFRESH_DEBUG is on and the sprintf is where we think it is
-#   2. the widest string the format can ever produce still fits on the glass and
-#      clears the 6 off-screen storage rows at the bottom
-#   3. it does not collide with the temperature ink on its left, and it sits on
+#   1. EPD_USE_REFRESH_DEBUG is a real 0/1 switch, and the sprintf is where we
+#      think it is (picked by ARITY, so reordering the draws cannot fool it)
+#   2. every counter's saturation cap covers the geometry that was designed for
+#      it: H must survive a whole day of hourly refreshes, because a cap that
+#      pegs before the reading is taken reports nothing (that was the v12.0 bug)
+#   3. the widest string the format + caps can ever produce still fits on the
+#      glass and clears the 6 off-screen storage rows at the bottom
+#   4. it does not collide with the temperature ink on its left, and it sits on
 #      the temperature's baseline (same row)
-#   4. it does not collide with the battery / version-badge row below it
-#   5. its whole ink span stays inside the per-minute gate window (glass
+#   5. it does not collide with the battery / version-badge row below it
+#   6. its whole ink span stays inside the per-minute gate window (glass
 #      x 54..190), so it is repainted every tick and can never go stale
-#   6. the four counters exist as extern in epd.h and as RAM uint8_t in app.c
-#   7. ANTI-DRIFT: every `force_full = 1` in app.c is paired with a matching
+#   7. the four counters exist as extern in epd.h and as RAM uint8_t in app.c
+#   8. ANTI-DRIFT: every `force_full = 1` in app.c is paired with a matching
 #      `cause_* = 1`, every cause_* is tallied into its own dbg_* counter, and
-#      every counter is drawn.  Add a fifth full-refresh cause and forget the
-#      counter and this fails - otherwise the on-glass numbers would silently
-#      under-report, which is worse than no instrument at all.
+#      every counter appears in the sprintf in the SAME order.  Add a fifth
+#      full-refresh cause and forget the counter and this fails - otherwise the
+#      on-glass numbers would silently under-report, which is worse than no
+#      instrument at all.
 #
 # Exit code 0 = all good, 1 = something drifted.
 #
@@ -82,9 +93,34 @@ def _find_debug_sprintf(text):
     this latch onto the temperature line by accident.
     """
     for m in re.finditer(r'sprintf\(buff,\s*"([^"]*)"\s*,([^;]*?)\);', text):
-        if m.group(1).count('%d') == len(COUNTERS):
+        if len(re.findall(r'%\d*d', m.group(1))) == len(COUNTERS):
             return m.group(1), m.group(2)
     return None
+
+
+def _slots(fmt):
+    """[(field width, raw spec)] per conversion, in format order."""
+    return [(int(m.group(1)) if m.group(1) else 0, m.group(0))
+            for m in re.finditer(r'%(\d*)d', fmt)]
+
+
+def _caps(text):
+    """{macro name: saturation cap} out of app.c's DBG_BUMP* defines.
+
+    v12.0 hard-coded the cap of 9 here as well as in app.c, which meant the two
+    could drift apart in silence.  Parsing it makes the widest-string
+    computation below follow app.c instead of an assumption about it.
+    """
+    return {m.group(1): int(m.group(2))
+            for m in re.finditer(
+                r'#define\s+(DBG_BUMP\w*)\(c\)\s+do\s*\{\s*if\s*\(\(c\)\s*<\s*(\d+)\)',
+                text)}
+
+
+def _tally_macro(a, name):
+    """The DBG_BUMP* macro that increments `name`, or None."""
+    m = re.search(r'\b(DBG_BUMP\w*)\(%s\)' % name, a)
+    return m.group(1) if m else None
 
 
 def main():
@@ -92,36 +128,67 @@ def main():
     _, g30 = load_font('font30.h', 'Special_Elite_Regular_30')
     e, a, h = src('epd.c'), src('app.c'), src('epd.h')
 
-    # 1 ----------------------------------------------------------------- set up
+    # 1 ------------------------------------------------------- the switch
     on = read_define('epd.c', 'EPD_USE_REFRESH_DEBUG', '0')
-    check(on == '1', 'EPD_USE_REFRESH_DEBUG is %s' % on)
+    check(on in ('0', '1'), 'EPD_USE_REFRESH_DEBUG is %r (must be 0 or 1)' % on)
+    print('        -> %s on the release glass; %s'
+          % ('counters ARE' if on == '1' else 'counters are OFF',
+             'this script then checks the live geometry'
+             if on == '1' else
+             'this script still checks the geometry they would need'))
 
     x = int(read_define('epd.c', 'EPD_DEBUG_X'))
     y = int(read_define('epd.c', 'EPD_DEBUG_Y'))
 
     m = _find_debug_sprintf(e)
     check(m is not None, 'found the counter sprintf in epd.c')
-    fmt = m[0] if m else 'H%d T%d B%d L%d'
+    fmt = m[0] if m else 'H%dT%dB%dL%d'
     args = m[1] if m else ''
-    check(fmt.count('%d') == len(COUNTERS),
+    slots = _slots(fmt)
+    check(len(slots) == len(COUNTERS),
           'format "%s" has %d slots for %d counters'
-          % (fmt, fmt.count('%d'), len(COUNTERS)))
+          % (fmt, len(slots), len(COUNTERS)))
 
-    # the counters saturate at 9, so replacing every %d with 9 is the widest
-    # string the glass can ever be asked to draw
-    widest = re.sub(r'%d', '9', fmt)
+    arg_list = [t.strip() for t in args.split(',')]
+    caps = _caps(a)
+    check(bool(caps), 'parsed the DBG_BUMP* saturation caps out of app.c: %s'
+          % ', '.join('%s<%d' % kv for kv in sorted(caps.items())))
+
+    # 2 ------------------------- each cap must outlast the geometry it serves
+    # The tag full-refreshes once an hour while it is awake, and is silent
+    # between NIGHT_START_HOUR and NIGHT_END_HOUR.  A counter is only read after
+    # roughly a day, so a cap that a single day can reach is useless.
+    ns = int(read_define('app.c', 'NIGHT_START_HOUR', '0'))
+    ne = int(read_define('app.c', 'NIGHT_END_HOUR', '24'))
+    night = (ne - ns) % 24
+    hourly_per_day = 24 - night
+    cap_h = caps.get(_tally_macro(a, 'dbg_hour') or '', 0)
+    check(cap_h >= hourly_per_day,
+          'dbg_hour cap %d survives a full day of %d hourly refreshes '
+          '(night %02d:00-%02d:00 excluded)' % (cap_h, hourly_per_day, ns, ne))
+
+    # 3 --------------------------------- the widest string, from the real caps
+    # A cap of 99 printed through "%d" still widens the string to 2 glyphs, so
+    # the widest rendering is max(digits in the cap, the format field width).
+    widths = []
+    for (width, _spec), argname in zip(slots, arg_list):
+        cap = caps.get(_tally_macro(a, argname) or '', 0)
+        widths.append(max(len(str(cap)), width))
+    it = iter(widths)
+    widest = re.sub(r'%\d*d', lambda _m: '9' * next(it), fmt)
+
     x0, x1, y0, y1 = ink_span(g16, x, y, widest)
+    print()
     print('debug string "%s" at (%d, %d) -> ink x %d..%d  y %d..%d'
           % (widest, x, y, x0, x1, y0, y1))
     print()
 
-    # 2 ------------------------------------------------------- on the glass
     check(0 <= x0 and x1 <= VDISP_W - 1,
           'x spans %d..%d inside 0..%d' % (x0, x1, VDISP_W - 1))
     check(y1 <= VISIBLE_H - 1,
           'y bottom %d is above the off-glass rows %d..127' % (y1, VISIBLE_H))
 
-    # 3 --------------------------------------------- clear of the temperature
+    # 4 --------------------------------------------- clear of the temperature
     mt = re.search(r'&Special_Elite_Regular_30,\s*(\d+),\s*(\d+)', e)
     check(mt is not None, 'found the temperature draw in epd.c')
     tx, ty = int(mt.group(1)), int(mt.group(2))
@@ -135,7 +202,7 @@ def main():
     check(x0 > tspan[1],
           'debug starts at x=%d, temperature ink ends at x=%d' % (x0, tspan[1]))
 
-    # 4 ------------------------------------- clear of the rows below (y=120)
+    # 5 ------------------------------------- clear of the rows below (y=120)
     min_yo = min(g['yo'] for g in g16.values())
     rows_below = []
     mb = re.search(r'"Battery %dmV"[^;]*;\s*obdWriteStringCustom\(&obd,\s*'
@@ -150,19 +217,19 @@ def main():
           'debug ink bottom y=%d clears the rows below (top y=%d: %s)'
           % (y1, top_below, ', '.join(n for n, _, _ in rows_below)))
 
-    # 5 ------------------------------------- inside the per-minute gate window
+    # 6 ------------------------------------- inside the per-minute gate window
     check(x0 >= GLASS_X_MIN and x1 <= GLASS_X_MAX,
           'ink x %d..%d inside the near-side window %d..%d (repainted each tick)'
           % (x0, x1, GLASS_X_MIN, GLASS_X_MAX))
 
-    # 6 ------------------------------------------------- the counters exist
+    # 7 ------------------------------------------------- the counters exist
     for name in COUNTERS:
         check(re.search(r'extern uint8_t[^;]*\b%s\b' % name, h) is not None,
               'epd.h declares extern %s' % name)
         check(re.search(r'RAM uint8_t\s+%s\s*=' % name, a) is not None,
               'app.c defines RAM uint8_t %s' % name)
 
-    # 7 -------------------------------------------------------------- coverage
+    # 8 -------------------------------------------------------------- coverage
     forces = re.findall(r'\bforce_full = 1;', a)
     causes = re.findall(r'\bcause_(\w+) = 1;', a)
     print()
@@ -172,16 +239,24 @@ def main():
           'every force_full = 1 is paired with its own cause_* = 1 (%d/%d)'
           % (len(forces), len(causes)))
     for suffix in causes:
-        check(re.search(r'if \(cause_%s\)\s+DBG_BUMP\(dbg_%s\)' % (suffix, suffix), a)
+        check(re.search(r'if \(cause_%s\)\s+DBG_BUMP\w*\(dbg_%s\)' % (suffix, suffix), a)
               is not None,
               'cause_%s is tallied into dbg_%s' % (suffix, suffix))
         check(('dbg_%s' % suffix) in COUNTERS,
               'dbg_%s is one of the drawn counters' % suffix)
     for name in COUNTERS:
-        check(re.search(r'DBG_BUMP\(%s\)' % name, a) is not None,
+        check(re.search(r'DBG_BUMP\w*\(%s\)' % name, a) is not None,
               '%s is incremented somewhere in the tick' % name)
-        check(re.search(r'\b%s\b' % name, args) is not None,
-              '%s reaches the glass (in the sprintf argument list)' % name)
+    # positional: the sprintf argument list, the format slots and the caps all
+    # have to line up, otherwise a counter would be printed under another label
+    check(arg_list == COUNTERS,
+          'sprintf arguments are %s (expected the declared order %s)'
+          % (arg_list, COUNTERS))
+    for (width, spec), name in zip(slots, arg_list):
+        cap = caps.get(_tally_macro(a, name) or '', 0)
+        check(width == 0 or width >= len(str(cap)),
+              'slot %s renders up to %d digits and the field is "%s"'
+              % (name, len(str(cap)), spec))
 
     print()
     if failures:

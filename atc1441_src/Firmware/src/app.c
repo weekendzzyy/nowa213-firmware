@@ -55,16 +55,25 @@ RAM uint16_t last_batt_shown = 0xFFFF; // last displayed battery voltage (mV)
 //   B = the battery voltage left its dead band
 //   L = the BLE connect state flipped
 //
-// Saturated at 9 so the string always fits, and counted only when the refresh
-// is actually painted, so the on-glass numbers match the flashes the eye sees.
-// dbg_armed skips the very first tick, whose sentinel comparisons (0xFF /
-// 0x7FFF / 0xFFFF) are not real causes.
+// Counted only when the refresh is actually painted, so the on-glass numbers
+// match the flashes the eye sees.  dbg_armed skips the very first tick, whose
+// sentinel comparisons (0xFF / 0x7FFF / 0xFFFF) are not real causes.
+//
+// v13.0: the saturation cap is per-counter, and the on-glass format has to
+// agree with it (tools/verify_refresh_debug.py fails if the two drift apart).
+// A flat cap of 9 was a mistake: H counts the hourly refresh, of which there
+// are 18 between 06:00 and 23:00, so it pegged at "H9" before lunch and the
+// reading said nothing.  The cap was chosen from what fits on the glass rather
+// than from how often the event happens - it should have been the other way
+// round.  The other three are expected to sit at or near zero, where a peg at
+// 9 is itself the alarm, so one digit is right for them.
 RAM uint8_t  dbg_hour = 0;
 RAM uint8_t  dbg_temp = 0;
 RAM uint8_t  dbg_batt = 0;
 RAM uint8_t  dbg_ble  = 0;
 RAM uint8_t  dbg_armed = 0;
-#define DBG_BUMP(c) do { if ((c) < 9) (c)++; } while (0)
+#define DBG_BUMP_H(c) do { if ((c) < 99) (c)++; } while (0) // hourly: needs 2 digits
+#define DBG_BUMP(c)   do { if ((c) < 9)  (c)++; } while (0) // rare: 9 already means "look"
 
 // ---- v11.0: dead bands for the two analog sources ---------------------------
 // Up to v10.0 the panel temperature was compared with `!=`.  That is a trap.
@@ -223,7 +232,7 @@ _attribute_ram_code_ void main_loop(void)
             if (cause_ble)    DBG_BUMP(dbg_ble);
             if (cause_temp)   DBG_BUMP(dbg_temp);
             if (cause_batt)   DBG_BUMP(dbg_batt);
-            if (hour_changed) DBG_BUMP(dbg_hour);
+            if (hour_changed) DBG_BUMP_H(dbg_hour);
         }
         dbg_armed = 1;
 
