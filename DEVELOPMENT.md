@@ -58,7 +58,7 @@ nowa213/
 │   ├── render_screen_preview.py  # ★改 UI 前先跑它：离线渲染整屏 PNG
 │   │                            #   --window 画窗口底纹 / --compare <照片> 对照参考面板
 │   │                            #   --debug 18,0,1,2 连诊断计数器一起画
-│   ├── verify_v14_layout.py  # ★66 项断言（含否定性自检）
+│   ├── verify_v14_layout.py  # ★75 项断言（含否定性自检）
 │   ├── gen_v14_tables.py     # 生成字体 / 历法 / 符文表
 │   ├── verify_part_lut.py    # LUT 布局断言
 │   ├── verify_time_catchup.py# 时钟追补断言
@@ -164,10 +164,11 @@ python TLSR825xComFlasher.py -p COM6 -t 3000 wf 0 <固件>.bin
 | 刷新策略（何时全刷） | `app.c` → `main_loop()` | 只有「分钟变→局部刷」「小时变→全刷」「`force_full`→全刷」三条路，**没有 N 分钟周期** |
 | 局部刷新窗口（省电） | `epd_layout.h` 的 `EPD_WIN_GATE_*` + `epd_bwr_213.c` 的 `0x01` / `0x0F` 写入处 | ★本机跑的是这个文件，不是 `epd_bw_213.c`。窗口由**时钟槽位**推导，不要手写数字 —— `verify_v14_layout.py` 会精确比对窗口与「枚举 1440 个 HH:MM 逐拍 diff」的并集 |
 | 局部刷新期间显示的值 | `app.c` 的 `shown_mv` / `shown_temp` 快照 | 窗口是**竖直带**，带内所有行都会被重写。行 1 的电压落在带内，所以必须给快照值，否则末位漂移被每分钟重绘 |
+| 右下角广播名/版本号 | `epd.c` 行 3 右端 + `epd_layout.h` 的 `ROW3_*` | 两者都**右对齐到 `ROW3_RIGHT_X`=231**（= 带的最后一列）且**符号槽 `ROW3_RUNE_X` 固定**。改宽度必须重查带内、不撞符文槽两条 |
 | 时钟走时 | `time.c` → `handler_time()` | 必须用 `while` 追补，**主循环频率不可假设** |
 | 电量换算 | `battery.c` → `get_battery_level()` | 测的是芯片 VDD，不是电池节点；窗口 2200→3100 mV |
 | BLE 指令 | `epd_ble_service.c` | opcode `0x00 <fill>` = memset 缓冲，`0x01` = 推送到屏 |
-| 版本号 | `app_config.h` → `FW_VERSION_STRING` | ⚠ **v14.0 起屏上不再显示版本号**：行 3 右下改画设备广播名（照参考面板）。版本号改完跟着 git tag 和归档文件名走即可 |
+| 版本号 | `app_config.h` → `FW_VERSION_STRING` | v14.1 起屏上**显示**：行 3 右下角在广播名与本串之间每 `ROW3_ALT_SECS`（5 min）交替。改完跟着 git tag 和归档文件名走；**保持 5 个字符**，否则要重查 `ROW3_TEXT_MAX_ADV` |
 | 字体 / 历法 / 符文表 | `tools/gen_v14_tables.py`（**不要手改 `font_unifont.h` / `font_chars.h` / `calendar_data.h`**）| 生成器会把编译进去的位图打进头文件注释，改完重跑生成器 + 验证器 |
 | 全刷原因诊断 | `app.c` 的 `dbg_*` / `cause_*` + `epd.c` 的 `EPD_USE_REFRESH_DEBUG` | v13.0 起出厂关闭（`0`）。计数逻辑**保留**，改回 `1` 重新编译即重新武装；v14.0 起计数器改画在**行 3**（替换农历文字），因此永远不会被局部刷新抹掉。**别把 `H` 的上限调回 9** —— 一天 18 次整点必然撞顶 |
 

@@ -57,22 +57,53 @@
 
 /* ---- row 3: lunar date + next solar term, and the BLE state ------------
  * Left side is the calendar text; the right side is the Bluetooth rune plus
- * the device's own advertised name, right aligned on ROW3_RIGHT_X.
+ * either the device's own advertised name or the firmware version, right
+ * aligned on ROW3_RIGHT_X and alternating every ROW3_ALT_SECS.
  *
  * The two sides share the row, so the left text may never reach the rune.  The
- * rune's slot is reserved whether or not anything is connected, so a connection
- * appearing cannot land on top of the calendar text.  tools/verify_v14_layout.py
- * walks every day of the supported range and if a future change ever made the
- * longest of them collide with that slot, the build check fails.
+ * rune's slot is FIXED - it does not follow the text's left edge, which would
+ * make the symbol jump sideways every time the text swapped - so ROW3_RUNE_X
+ * is derived from the WIDEST of the two strings, and the narrower one simply
+ * leaves a bigger gap.  tools/verify_v14_layout.py walks every day of the
+ * supported range and if a future change ever made the longest of them collide
+ * with that slot, the build check fails.
  *
- * Both sides are stable between full refreshes: the calendar text only changes
- * at midnight (an hour tick, so a full refresh) and the bracket never changes,
- * while a change in the connection state forces a full refresh in app.c.
+ * ROW3_RIGHT_X is deliberately 231, not the glass edge: 231 is the last column
+ * the per-minute gate window drives, and the name/version swap has to be
+ * repainted by a partial tick.  Anything outside the band keeps its previous
+ * state on the panel, so a swap that straddled the edge would leave the tail of
+ * the old string rotting next to the new one until the next full refresh.
+ * Right-aligning to the band's edge also lines row 3 up with row 1, whose
+ * widest string ends at 228.
+ *
+ * The version half of the swap is stable by construction; the name half is
+ * derived from mac_public[], constant for the life of a boot.
  */
 #define ROW3_Y         104
 #define ROW3_X         2
-#define ROW3_RIGHT_X   248
+#define ROW3_RIGHT_X   231
 #define RUNE_GAP       3
+
+/* The two right-corner strings, widest first.  "[B2C3]" is the tail of the
+ * advertised name - "ESL_" plus six hex digits - which is exactly what the
+ * reference panel shows ([881A], four digits, not the whole MAC). */
+#define ROW3_TEXT_MAX_CHARS  6
+#define ROW3_TEXT_MAX_ADV    48
+
+/* The rune is 8 px wide; epd_font.h asserts its own EPD_RUNE_W against this. */
+#define ROW3_RUNE_W    8
+#define ROW3_RUNE_X    (ROW3_RIGHT_X - ROW3_TEXT_MAX_ADV - RUNE_GAP - ROW3_RUNE_W)
+
+/* The name/version swap period.  It costs nothing to run it often: the swap
+ * rides a partial tick that happens anyway, so 5 minutes is free. */
+#define ROW3_ALT_SECS  300
+
+#if ROW3_TEXT_MAX_ADV != 6 * 8
+#error "row 3: the widest right-corner string is no longer 6 ASCII glyphs"
+#endif
+#if ROW3_RIGHT_X + 1 > FACE_W
+#error "row 3: the right corner runs off the glass"
+#endif
 
 /* ---- row 2: the clock -------------------------------------------------
  * Not a font.  The 40 pt DSEG face the previous layout used has a 0.85
@@ -157,7 +188,15 @@
 #define EPD_WIN_GATES       (EPD_WIN_GATE_LAST - EPD_WIN_GATE_FIRST + 1)
 
 /* The window must not also be asked to carry anything that changes off the
- * minute - those all force a full refresh instead (see app.c). */
+ * minute - those all force a full refresh instead (see app.c).  The name/version
+ * swap is the one deliberate exception: it changes on a 5-minute boundary, which
+ * IS a minute tick, and it sits inside the band on purpose - asserted here. */
+#if ROW3_RIGHT_X > EPD_WIN_GATE_LAST - EPD_WIN_GATE_OFFSET
+#error "row 3: the name/version swap must sit inside the per-minute band, or a partial tick would leave the tail of the old string on the glass"
+#endif
+#if ROW3_RUNE_X <= ROW3_X
+#error "row 3: no room left between the calendar text and the rune"
+#endif
 #if EPD_WIN_GATES < 16 || EPD_WIN_GATES > 296
 #error "gate window: MUX ratio must stay within 16..296 (SSD1680 p.34)"
 #endif

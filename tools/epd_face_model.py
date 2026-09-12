@@ -771,13 +771,31 @@ class Face(object):
         return tmp.slice(n)
 
     def mac_bracket(self, mac):
-        return '[%02X%02X%02X]' % (mac[2], mac[1], mac[0])
+        # The tail of the advertised name - "ESL_" plus six hex digits - which
+        # is what the reference panel shows: four digits, [881A], not the MAC.
+        return '[%02X%02X]' % (mac[1], mac[0])
 
-    def row3_right_x(self, mac):
-        return self.L['ROW3_RIGHT_X'] - self.text_width(self.mac_bracket(mac))
+    def row3_version(self):
+        return self.version
 
-    def row3_rune_x(self, mac):
-        return self.row3_right_x(mac) - self.L['RUNE_GAP'] - self.rune_w
+    def row3_alt_state(self, t):
+        """0 = the advertised name, 1 = the firmware version."""
+        return (t // self.L['ROW3_ALT_SECS']) & 1
+
+    def row3_text(self, t, mac=(0xA1, 0xB2, 0xC3)):
+        return self.row3_version() if self.row3_alt_state(t) \
+            else self.mac_bracket(mac)
+
+    def row3_right_x(self, text):
+        # ROW3_RIGHT_X is the last column the string OCCUPIES (inclusive), not
+        # the pen position after it - that is what makes "inside the band"
+        # readable off the header.
+        return self.L['ROW3_RIGHT_X'] - self.text_width(text) + 1
+
+    def row3_rune_x(self):
+        # A FIXED slot, from epd_layout.h: the two strings differ in width, so
+        # following the text would make the rune jump sideways on every swap.
+        return self.L['ROW3_RUNE_X']
 
     # -- the whole face -----------------------------------------------------
     def face(self, buf, wpitch, height, t, mv, temperature, mac=(0xA1, 0xB2, 0xC3),
@@ -798,12 +816,11 @@ class Face(object):
             if r3:
                 self.utext(buf, wpitch, height, L['ROW3_X'], L['ROW3_Y'], r3)
 
-        b = self.mac_bracket(mac)
-        x = L['ROW3_RIGHT_X'] - self.text_width(b)
-        self.text(buf, wpitch, height, x, L['ROW3_Y'], b)
+        b = self.row3_text(t, mac)
+        self.text(buf, wpitch, height, self.row3_right_x(b), L['ROW3_Y'], b)
         if connected:
-            self.rune(buf, wpitch, height,
-                      x - L['RUNE_GAP'] - self.rune_w, L['ROW3_Y'] + 1)
+            self.rune(buf, wpitch, height, self.row3_rune_x(),
+                      L['ROW3_Y'] + 1)
         return hhmm
 
 

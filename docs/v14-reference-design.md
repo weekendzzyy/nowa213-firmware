@@ -249,7 +249,7 @@ bls_ll_setScanRspData((uint8_t *)ble_name, sizeof(ble_name));
 推导期的脚本在 `D:\tmp\nowa213_layout_analysis\`，**没有并入 `tools/`** ——
 它们的度量口径是分析期自定的，与固件实际实现之间存在第二份真源。交付版用
 `tools/epd_face_model.py` 取代了它们：那是 `epd_font.c` / `epd.c` / `calendar.c` 的
-逐行镜像，**解析源码而不是复述源码**，预览与 66 项断言都跑在它上面。
+逐行镜像，**解析源码而不是复述源码**，预览与 75 项断言都跑在它上面。
 
 | 分析期脚本 | 作用 | 交付版对应物 |
 |---|---|---|

@@ -427,15 +427,27 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
         epd_utext(scr, wp, ht, ROW3_X, ROW3_Y, r3);
 #endif
 
-    /* ---- row 3 right: the rune (only while connected) and the device name.
-     * The name is the string the tag advertises, so what is on the glass is
-     * what a scanner shows; the rune is drawn to the left of it and its slot
-     * is left empty when nothing is connected. ---- */
-    sprintf(b, "[%02X%02X%02X]", mac_public[2], mac_public[1], mac_public[0]);
-    x = ROW3_RIGHT_X - epd_text_width(b);
+    /* ---- row 3 right: the rune (only while connected), then the device's
+     * advertised name or the firmware version, alternating every
+     * ROW3_ALT_SECS.  The name is the string the tag advertises, so what is on
+     * the glass is what a scanner shows; the version is the only place left to
+     * put it since this layout took the corner over.
+     *
+     * The rune is drawn at the FIXED slot ROW3_RUNE_X rather than to the left
+     * of whichever string is up - the two strings differ in width, so following
+     * the text would make the symbol jump sideways on every swap.
+     *
+     * Both strings are right aligned on ROW3_RIGHT_X, which is the last column
+     * the per-minute window drives: the swap is therefore repainted by the
+     * partial tick that carries it, and costs no full refresh at all. ---- */
+    if ((t / ROW3_ALT_SECS) & 1)
+        sprintf(b, "%s", FW_VERSION_STRING);
+    else
+        sprintf(b, "[%02X%02X]", mac_public[1], mac_public[0]);
+    x = ROW3_RIGHT_X - epd_text_width(b) + 1;
     epd_text(scr, wp, ht, x, ROW3_Y, b);
     if (ble_get_connected())
-        epd_rune(scr, wp, ht, x - RUNE_GAP - EPD_RUNE_W, ROW3_Y + 1);
+        epd_rune(scr, wp, ht, ROW3_RUNE_X, ROW3_Y + 1);
 }
 
 _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial)

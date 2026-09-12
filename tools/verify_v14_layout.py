@@ -252,11 +252,27 @@ def check_window(face, rep, cells, union):
 
     got_first = lo + L['EPD_WIN_GATE_OFFSET']
     got_last = hi + L['EPD_WIN_GATE_OFFSET']
+
+    # A partial tick can also carry the name/version swap, which the clock
+    # diff above knows nothing about.  Both strings are right aligned on the
+    # same column, so the columns a swap can change run from the narrower
+    # string's left edge to ROW3_RIGHT_X; fold that into the union.
+    a = face.row3_text(0)
+    b = face.row3_text(L['ROW3_ALT_SECS'])
+    swap_lo = min(face.row3_right_x(a), face.row3_right_x(b))
+    swap_hi = L['ROW3_RIGHT_X']
+    rep.note('the "%s" / "%s" swap can change glass %d..%d'
+             % (a, b, swap_lo, swap_hi))
+    lo = min(lo, swap_lo)
+    hi = max(hi, swap_hi)
+
     rep.note('changed columns: glass %d..%d  ->  gate %d..%d'
              % (lo, hi, got_first, got_last))
     rep.note('declared window: gate %d..%d  (%d gates, %.0f%% of 296)'
              % (first, last, last - first + 1, (last - first + 1) * 100.0 / 296))
 
+    got_first = lo + L['EPD_WIN_GATE_OFFSET']
+    got_last = hi + L['EPD_WIN_GATE_OFFSET']
     rep.chk(first <= got_first and got_last <= last,
             'the window covers every column a partial tick can change',
             'covers %d..%d' % (got_first, got_last))
@@ -395,19 +411,46 @@ def check_row3(face, rep):
     L = face.L
     rep.head('row 3')
     mac = (0xA1, 0xB2, 0xC3)
-    bracket = face.mac_bracket(mac)
-    bx = face.row3_right_x(mac)
-    rx = face.row3_rune_x(mac)
-    rep.note('left text at x=%d; rune slot %d..%d; "%s" at %d..%d'
-             % (L['ROW3_X'], rx, rx + face.rune_w - 1, bracket, bx,
-                bx + face.text_width(bracket) - 1))
+    rx = face.row3_rune_x()
+    rep.note('left text at x=%d; rune slot %d..%d (fixed)'
+             % (L['ROW3_X'], rx, rx + face.rune_w - 1))
 
-    rep.chk(bx + face.text_width(bracket) <= L['FACE_W'],
-            'the device name fits inside the right edge',
-            'ends at %d of %d' % (bx + face.text_width(bracket), L['FACE_W']))
-    rep.chk(rx >= 0 and L['ROW3_X'] < rx,
-            'the rune slot is on the glass, right of the text origin',
-            '%d' % rx)
+    # The right corner carries two strings that alternate, so both have to be
+    # measured: the wider one is what ROW3_RUNE_X is derived from, and BOTH have
+    # to sit inside the per-minute band or the swap would be repainted only in
+    # part, leaving the tail of the old string on the glass.
+    texts = [face.mac_bracket(mac), face.row3_version()]
+    for s in texts:
+        bx = face.row3_right_x(s)
+        end = bx + face.text_width(s) - 1
+        rep.note('"%s" %d px at %d..%d' % (s, face.text_width(s), bx, end))
+        rep.chk(end == L['ROW3_RIGHT_X'],
+                '"%s" is right aligned on ROW3_RIGHT_X' % s,
+                'ends at %d of %d' % (end, L['ROW3_RIGHT_X']))
+        rep.chk(bx >= 0 and end < L['FACE_W'],
+                '"%s" fits on the glass' % s, '%d..%d' % (bx, end))
+        first = L['EPD_WIN_GATE_FIRST'] - L['EPD_WIN_GATE_OFFSET']
+        last = L['EPD_WIN_GATE_LAST'] - L['EPD_WIN_GATE_OFFSET']
+        rep.chk(bx >= first and end <= last,
+                '"%s" sits inside the per-minute band' % s,
+                'band %d..%d' % (first, last))
+        rep.chk(bx > rx + face.rune_w - 1,
+                '"%s" clears the fixed rune slot' % s,
+                'starts at %d, rune ends at %d' % (bx, rx + face.rune_w - 1))
+
+    # ... and the swap must actually happen, on the cadence the header claims.
+    t0 = ts(2026, 9, 12, 12, 0)
+    period = L['ROW3_ALT_SECS']
+    rep.chk(face.row3_text(t0) != face.row3_text(t0 + period),
+            'the right corner alternates on ROW3_ALT_SECS',
+            '%d s -> "%s" then "%s"'
+            % (period, face.row3_text(t0), face.row3_text(t0 + period)))
+    rep.chk(face.row3_text(t0) == face.row3_text(t0 + period - 60),
+            'and holds still for the minutes in between',
+            'at %+d s it is still "%s"' % (period - 60, face.row3_text(t0 + period - 60)))
+    rep.chk(face.rune_w == L['ROW3_RUNE_W'],
+            'the rune is the width epd_layout.h reserved',
+            '%d' % face.rune_w)
 
     # The rune is drawn from its own bitmap array, not from a slice of the font.
     # A mirror that reads UF_BITS at offset 0 gets the subset's first glyph - a
@@ -814,12 +857,12 @@ def check_falsification(face, rep, cells, union, row3_worst):
     # (e) one more glyph than the WIDEST row-3 text must trip the collision test
     w_now = row3_worst[0]
     w_more = w_now + face.uf_find(ord('年'))[2]     # one 16 px CJK glyph
-    rep.chk(L['ROW3_X'] + w_more > face.row3_rune_x(mac)
-            and L['ROW3_X'] + w_now <= face.row3_rune_x(mac),
+    rep.chk(L['ROW3_X'] + w_more > face.row3_rune_x()
+            and L['ROW3_X'] + w_now <= face.row3_rune_x(),
             'one more glyph in row 3 trips the collision test',
             'widest is "%s", ends at %d; +1 glyph would end at %d, rune slot '
             'starts at %d' % (row3_worst[1], L['ROW3_X'] + w_now,
-                              L['ROW3_X'] + w_more, face.row3_rune_x(mac)))
+                              L['ROW3_X'] + w_more, face.row3_rune_x()))
 
     # (f) the calendar walk is the other side of the same coin: it re-derives
     #     every day of 25 years from CAL_LUNAR_INFO, so a single wrong bit in

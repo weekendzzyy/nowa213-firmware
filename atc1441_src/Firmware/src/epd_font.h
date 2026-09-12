@@ -36,9 +36,13 @@ int epd_text_width(const char *s);
 int epd_utext_width(const uint16_t *s);
 
 /* The Bluetooth rune, drawn at (x, ytop).  The size is part of the interface
- * because callers lay the device name out around it; epd_font.c checks these
- * against the generated bitmap at compile time, so the two cannot drift. */
-#define EPD_RUNE_W 8
+ * because callers lay the device name out around it.  Its width comes from
+ * epd_layout.h, which reserves the rune's slot from it; epd_font.c then checks
+ * that against the generated bitmap, so no two of the three can drift. */
+#ifndef ROW3_RUNE_W
+#error "epd_font.h needs epd_layout.h for ROW3_RUNE_W - the rune's slot is reserved from it"
+#endif
+#define EPD_RUNE_W ROW3_RUNE_W
 #define EPD_RUNE_H 13
 void epd_rune(uint8_t *scr, int wpitch, int height, int x, int ytop);
 

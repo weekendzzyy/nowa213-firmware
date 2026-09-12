@@ -246,14 +246,21 @@ def main():
     print('row 1: %s   (%d px, ends at %d of %d)'
           % (''.join(chr(c) for c in rows1), face.utext_width(rows1),
              L['ROW1_X'] + face.utext_width(rows1), W))
-    rx, bx = face.row3_rune_x(mac), face.row3_right_x(mac)
+    rx = face.row3_rune_x()
+    shown = face.row3_text(t, mac)
+    bx = face.row3_right_x(shown)
+    other = face.mac_bracket(mac) if shown == face.row3_version() \
+        else face.row3_version()
     if debug is None:
         r3 = face.row3(t)
         print('row 3: %s   (%d px, ends at %d; rune slot %d..%d; "%s" at %d..%d)'
               % (''.join(chr(c) for c in r3), face.utext_width(r3),
                  L['ROW3_X'] + face.utext_width(r3), rx, rx + face.rune_w - 1,
-                 face.mac_bracket(mac), bx,
-                 bx + face.text_width(face.mac_bracket(mac)) - 1))
+                 shown, bx, bx + face.text_width(shown) - 1))
+        ox = face.row3_right_x(other)
+        print('       the other half of the swap, "%s", is %d px at %d..%d'
+              % (other, face.text_width(other), ox,
+                 ox + face.text_width(other) - 1))
     else:
         print('row 3: counters H%02dT%dB%dL%d   (calendar text suppressed)'
               % debug)
@@ -283,7 +290,7 @@ def main():
     # The rune sits in a slot reserved whether or not anything is connected, so
     # the calendar text can never reach it; the red box is that slot.
     x0, y0 = max(0, rx - 24), L['ROW3_Y'] - 2
-    x1, y1 = L['ROW3_RIGHT_X'], L['ROW3_Y'] + 17
+    x1, y1 = L['ROW3_RIGHT_X'] + 1, L['ROW3_Y'] + 17
     sub = Canvas(x1 - x0, y1 - y0)
     sub.ink([r[x0:x1] for r in rows[y0:y1]], 0, 0)
     sub.rect(rx - x0, L['ROW3_Y'] + 1 - y0, rx + face.rune_w - 1 - x0,

@@ -17,12 +17,15 @@ extern "C" {
 // firmware_releases/ file name.
 //
 // v14.0 removed the on-glass version badge (the reference layout has no room
-// for one - row 3's right-hand corner belongs to the device name now), so this
-// string is no longer drawn anywhere.  It is still what the release tooling
-// and the firmware_releases/ file name key off, and tools/verify_v14_layout.py
-// fails if the two ever disagree.
-// Format: "v<major>.<minor>"
-#define FW_VERSION_STRING "v14.0"
+// for one - row 3's right-hand corner belongs to the device name), so this
+// string was no longer drawn anywhere.  v14.1 brought it back: the corner now
+// alternates between the name and this string every ROW3_ALT_SECS, so what it
+// says is what appears on the glass for half the time.
+// It is still what the release tooling and the firmware_releases/ file name key
+// off, and tools/verify_v14_layout.py fails if the width no longer fits the
+// slot epd_layout.h reserves for it.
+// Format: "v<major>.<minor>" - keep it 5 characters, or re-check ROW3_TEXT_MAX_ADV.
+#define FW_VERSION_STRING "v14.1"
 
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 
