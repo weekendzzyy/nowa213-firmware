@@ -1274,3 +1274,83 @@ advance（笔位）右对齐的，但**笔位对齐不等于墨迹对齐**——
 **SHA256**：`6553555c5de27eff984f531dae82127145c0065a0be71622fab3881837a7239a`
 **大小**：83072 字节（= `ATC_Paper.bin` 去掉末尾 4 字节 CRC32；CRC = `5b9b899c`）
 **SRAM**：`_end_bss_ = 0x84efa1`
+
+---
+
+## v15.0 — 2026-09-13（三页显示：时间 / 月历 / 图片；红色层启用；BLE 切页）
+
+> 注：本条为 v15.1 发版时补记——v15.0 发布（commit `68588c7`、tag `v15.0`）时 CHANGELOG 漏更。
+
+**功能**：把价签从「单一时钟」升级为三页设备，按需求文档 `docs/v15-requirements.md` 实现。
+
+- **页面框架**：页面状态存 flash `0x7A000`（magic 后写，防断电半截）；切页必全刷且
+  即使在夜间静默窗口也立即执行（用户手动动作）；每页只订阅自己的刷新事件
+  （时间页：分钟局部/整点全刷；月历页：午夜全刷 + 每 2 h 电压带局部刷；图片页：零定时刷新）。
+- **月历页（第 2 页）**：周一起始 7 列网格，周一~五黑、周六日**红**，今日反色块（颜色跟随星期）；
+  右栏五项水平居中：`2026年9月` / 今日日期（数字 250% 红、「日」100% 底边墨迹对齐 + 5 px 光学抬升）/
+  当天农历 / 当天节气 / 电压。正文汉字 75%、ASCII 88%（=7 px 整）。版面常量全部在 `epd_layout.h`，
+  带 14 条编译期断言。
+- **红色层**：`epd_bwr_213.c` 的刷新拆为 `Begin / Load / Activate`，黑帧(0x24)与红帧(0x26)
+  **复用同一 `epd_buffer` 先后送入**，RAM 增量 0（`_end_bss_` 与 v14.4 完全相同，实测验证）。
+  原上游 TODO「红 RAM 全填 0」就此启用。月历电压带局部刷新可用 `EPD_CAL_BWR_PARTIAL 0` 一键回退全刷。
+- **BLE 切页**：`epd_ble_service.c` 新增 opcode `0x05`（跳指定页 1/2/3）、`0x06`（翻下一页，循环）。
+- **NFC**：v15.0 范围内**仍为摆设**（`nfc.c` 仅 `init_nfc()` 复位芯片），NFC 场检测排 v15.1。
+
+**改动文件**（`atc1441_src/Firmware/src/`）：`epd_layout.h`（CAL_* 段）、`epd.c`（月历渲染
+`epd_face_calendar`、`epd_display` 按页分发、页面状态存取、`info_center_mixed`）、`epd.h`、
+`epd_font.c/.h`（`uf_blit_ex` 缩放/擦除、`epd_text_scale` 族）、`calendar.c/.h`（拆出
+`cal_lunar_text`/`cal_term_text`、`cal_weekday`、`cal_days_in_month`）、`app.c/.h`（页面状态机）、
+`epd_ble_service.c`（opcode 0x05/0x06）、`app_config.h`。
+工具侧：`tools/epd_face_model.py` / `tools/render_screen_preview.py` 镜像月历页（`--page 2`，
+黑红两遍合成）。
+
+**验证**：`tools/verify_v14_layout.py` 81 项 PASS；时间页回归与 v14.4 逐列一致（row3 重构零漂移）；
+月历页两遍渲染与手绘草图一致；`_end_bss_ = 0x84efa1` 不变。
+
+**发布文件**：`firmware_releases/atc1441_3page_v15.0_2026-09-13_85468B.bin`
+**SHA256**：`2b870b465dbf677c5d2dc96516b63b771c96857782332e79aa9588e1cff1fa73`
+**大小**：85468 字节
+**SRAM**：`_end_bss_ = 0x84efa1`
+**git**：commit `68588c7`，tag `v15.0`
+
+---
+
+## v15.1 — 2026-09-13（NFC 场检测：手机贴一下 = 翻下一页）
+
+**功能**：v15 分期的第二步。**空贴翻页**——手机（任何 NFC App 开着即可，无需写数据）贴近
+价签，触发翻到下一页（时间 → 月历 → 图片 → 时间，循环）。不解析 NDEF（那是 v15.2 的
+命令通道）；本版**不改动蓝牙电源**：广播照旧 10 s 间隔永不关，BLE 随时可达
+（铁律见 `docs/v15-requirements.md` §5.1：NFC 命令通道真机验证通过之前禁止默认关广播）。
+
+**实现**（`atc1441_src/Firmware/src/`）：
+
+- `nfc.c` —— FM11NC081 的 `IRQ_N`（PC4，开漏低有效）在场出现/读写时拉低：
+  - `nfc_wake_prepare()`：`cpu_set_gpio_wakeup(NFC_IRQ, 0, 1)` + `bls_pm_setWakeupSource(PM_WAKEUP_PAD)`。
+    主循环每个 pass 在挂起前调用——否则广播间隔 10 s 意味着主循环约 10 s 才转一圈，
+    纯轮询会让贴卡响应慢达 10 s；PAD 唤醒让贴卡**立即**唤醒并在同一 pass 翻页。
+  - `nfc_poll()`：状态机 = 等待场出现 → 20 ms 去抖（要求线仍为低）→ `app_set_page(下一页)` →
+    **等待释放**（线回高才重新武装）+ 2 s 反触发窗口（NFC App 打开时会反复轮询，防连环翻页）。
+  - `nfc_gpio_reconfig()`：PC4 输入 + 10 K 上拉，供深睡保留唤醒后重配
+    （GPIO 配置不保证跨保留唤醒存活，`user_init_deepRetn()` 末尾调用）。
+  - `init_nfc()` 改为调用 `nfc_gpio_reconfig()`，行为不变。
+- `app.c` —— `main_loop` 在 `handler_time()` 之后调 `nfc_poll()`（在绘制块之前，
+  翻页当拍即被 `page_switch_pending` 路径接住，全刷且不受夜间窗口拦截）；
+  挂起分支加 `nfc_wake_prepare()`；`user_init_deepRetn()` 加 `nfc_gpio_reconfig()`。
+- `app_config.h` —— 版本号 `v15.1`。
+
+**边界与已知风险（真机验证项）**：
+
+- IRQ_N 的确切时序（场出现是否持续拉低、手机反复轮询时是否抖动）来自数据手册描述，
+  未实测；状态机的「等待释放 + 2 s 窗口」是按最坏情况设计的，实测如仍连翻，
+  调大 `nfc_ignore_until` 的窗口即可。
+- 若板卡 IRQ 线极性与手册相反（贴卡无反应），把 `nfc_poll`/`nfc_wake_prepare` 里的
+  有效电平从 0 改 1 即可，无需动其他逻辑。
+
+**验证**：`tools/verify_v14_layout.py` 81 项 PASS（UI 未动，纯回归）；镜像 85596 B
+（v15.0 85468，+128）；`_end_bss_ = 0x84efa1` **不变**（新增仅两个 RAM 状态变量）；
+符号表确认 `nfc_poll` / `nfc_wake_prepare` / `nfc_gpio_reconfig` 已链入。
+
+**发布文件**：`firmware_releases/atc1441_3page_v15.1_2026-09-13_85596B.bin`
+**SHA256**：`ae7b5b9bd3a4a86a7308d2e44e23acf858f93a382003da6354997cd5e4538e88`
+**大小**：85596 字节
+**SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）

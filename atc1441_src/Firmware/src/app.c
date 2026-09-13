@@ -180,12 +180,17 @@ _attribute_ram_code_ void user_init_deepRetn(void)
     blc_ll_initBasicMCU();
     rf_set_power_level_index(RF_POWER_P3p01dBm);
     blc_ll_recoverDeepRetention();
+    nfc_gpio_reconfig(); // v15.1: PC4 input + pull-up are not guaranteed to survive retention
 }
 
 _attribute_ram_code_ void main_loop(void)
 {
     blt_sdk_main_loop();
     handler_time();
+
+    // v15.1: a phone tap = next page.  Called before the paint block so a flip
+    // flagged here is taken by page_switch_pending in the very same pass.
+    nfc_poll();
 
     if (time_reached_period(Timer_CH_1, 30))
     {
@@ -402,6 +407,7 @@ _attribute_ram_code_ void main_loop(void)
     }
     else
     {
+        nfc_wake_prepare(); // v15.1: arm the NFC IRQ as a PAD wakeup before every suspend
         blt_pm_proc();
     }
 }

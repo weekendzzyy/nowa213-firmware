@@ -25,7 +25,7 @@ extern "C" {
 // off, and tools/verify_v14_layout.py fails if the width no longer fits the
 // slot epd_layout.h reserves for it.
 // Format: "v<major>.<minor>" - keep it 5 characters, or re-check ROW3_TEXT_MAX_ADV.
-#define FW_VERSION_STRING "v15.0"
+#define FW_VERSION_STRING "v15.1"
 
 #define RAM _attribute_data_retention_ // short version, this is needed to keep the values in ram after sleep
 
