@@ -298,8 +298,8 @@
  * stacked below it.  Every one of them is centred in the column. */
 #define CAL_INFO_TITLE_Y 2
 #define CAL_INFO_TODAY_Y 18
-#define CAL_INFO_LUNAR_Y 68
-#define CAL_INFO_TERM_Y  84
+#define CAL_INFO_LUNAR_Y 62
+#define CAL_INFO_TERM_Y  82
 #define CAL_INFO_VOLT_Y  100
 
 /* The voltage line.  "9999mV" is the widest string the row-1 clamp allows, so
