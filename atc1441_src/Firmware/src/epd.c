@@ -336,6 +336,26 @@ _attribute_ram_code_ void FixBuffer(uint8_t *pSrc, uint8_t *pDst, uint16_t width
     }                                                          // for y
 }
 
+/* v15.4: the red RAM (0x26) has the opposite polarity from the black RAM
+ * (0x24).  The controller treats 0x00 in 0x26 as "no red" (the old
+ * EPD_BWR_213_LoadZeros path proved that), whereas FixBuffer's inversion
+ * would turn a source background of 0 into 0xFF -> red.  Keep the X mirror,
+ * drop the inversion. */
+_attribute_ram_code_ void FixBufferRed(uint8_t *pSrc, uint8_t *pDst, uint16_t width, uint16_t height)
+{
+    int x, y;
+    uint8_t *s, *d;
+    for (y = 0; y < (height / 8); y++)
+    { // byte rows
+        d = &pDst[y];
+        s = &pSrc[y * width];
+        for (x = 0; x < width; x++)
+        {
+            d[x * (height / 8)] = ucMirror[s[width - 1 - x]]; // flip only
+        }                                                     // for x
+    }                                                         // for y
+}
+
 _attribute_ram_code_ void TIFFDraw(TIFFDRAW *pDraw)
 {
     uint8_t uc = 0, ucSrcMask, ucDstMask, *s, *d;
@@ -819,7 +839,7 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
             obdFill(&obd, 0, 0);
             epd_face_calendar(obd.ucScreen, resolution_w, resolution_h, time_is,
                               battery_mv, 1);
-            FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
+            FixBufferRed(epd_temp, epd_buffer, resolution_w, resolution_h);
             EPD_BWR_213_Load(epd_buffer, size, 0x26);
 
             EPD_BWR_213_Activate(cal_full);
