@@ -293,13 +293,14 @@
 /* The info column's inner width, for centring runs inside it. */
 #define CAL_INFO_WIDTH   (CAL_INFO_RIGHT_X - CAL_INFO_X + 1)
 
-/* rows of the info column (top of each).  Five lines now, evenly spaced, with
- * the voltage at the bottom.  Every one of them is centred in the column. */
+/* rows of the info column (top of each).  Five lines, with the enlarged today
+ * date dominating the upper half and the smaller lunar/term/voltage lines
+ * stacked below it.  Every one of them is centred in the column. */
 #define CAL_INFO_TITLE_Y 2
 #define CAL_INFO_TODAY_Y 18
-#define CAL_INFO_LUNAR_Y 62
-#define CAL_INFO_TERM_Y  82
-#define CAL_INFO_VOLT_Y  102
+#define CAL_INFO_LUNAR_Y 68
+#define CAL_INFO_TERM_Y  84
+#define CAL_INFO_VOLT_Y  100
 
 /* The voltage line.  "9999mV" is the widest string the row-1 clamp allows, so
  * the advance is fixed and the centred x is a CONSTANT - which is what lets the
@@ -347,30 +348,15 @@
  * not eyeballed - tools/epd_face_model.py reproduces the numbers. */
 #define CAL_TODAY_SUFFIX_LIFT    5
 
-/* Everything in the info column is drawn at ONE size: the title, the lunar
- * date, the solar term and the voltage all share it.
+/* Everything in the info column except the enlarged today date is drawn at
+ * one pair of sizes: ASCII digits at 6 px and Han glyphs at 8 px.  Unifont
+ * gives ASCII an 8 px advance and Han 16 px, so the ratios are 75% and 50%.
  *
- * The title's Han was briefly trimmed to 75 to balance the digits' 8 px width
- * against the Han's 16, but that made the title smaller than the lines below
- * it - its own kind of raggedness.  One size for the whole column wins.  The
- * digits being narrower than the Han is a property of Unifont, not of this
- * layout; the only cure is widening the digits, which needs a wider info column
- * and a narrower calendar grid. */
-/* The title "2026年9月": digits at 100, the Han trimmed to 75.
- *
- * This is the ONLY way to even the two halves out without touching the grid:
- * growing the digits needs 112 px of an 85 px column, but shrinking the Han
- * only FREES width - "2026年9月" drops from 72 px to 64 px and the calendar
- * keeps its 23 px columns.
- *
- * 75 is the floor in practice: a Han glyph is drawn on a 16x16 cell, so 50%
- * leaves 8x8 and the strokes merge into a blob - the 日 test at 50% vanished
- * entirely.  75% (12x12) still reads. */
-/* 88% of the 8 px digit advance is exactly 7 px - dropping the LAST column is
- * a clean cut, unlike 80% (6 px) which samples unevenly and roughs up the
- * edges. */
-#define CAL_INFO_DIGIT_RATIO     88
-#define CAL_INFO_HAN_RATIO       75
+ * 50% Han is the readable floor for this panel: a 16x16 glyph down to 8x8
+ * still holds its strokes at the BWR 213's dot pitch, and it is what the user
+ * asked for after seeing the previous 7 px / 12 px mix look unbalanced. */
+#define CAL_INFO_DIGIT_RATIO     75
+#define CAL_INFO_HAN_RATIO       50
 
 /* Trimming the today box by this many px per side keeps the reversed block off
  * its neighbours' ink. */
