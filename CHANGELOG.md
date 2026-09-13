@@ -1354,3 +1354,52 @@ advance（笔位）右对齐的，但**笔位对齐不等于墨迹对齐**——
 **SHA256**：`ae7b5b9bd3a4a86a7308d2e44e23acf858f93a382003da6354997cd5e4538e88`
 **大小**：85596 字节
 **SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）
+
+## v15.2 — 2026-09-13（NFC 命令通道：手机写帧即可校时 / 切页 / 强制刷新）
+
+**功能**：v15 分期的第三步、也是 NFC 部分终章。**手机贴一下、写一帧命令，无需开 BLE 即可
+驱动价签**——校时（0x04）、翻到下一页（0x01）、跳到指定页（0x02）、强制全刷（0x05）、
+读状态（手机从保留区回读 0x5A + 版本 + 电压 + 当前页 + 上次命令码/结果）。蓝牙电源仍
+**一行未动**：`init_ble()` 里 `bls_ll_setAdvEnable(1)` 常开，`bls_ll_setAdvEnable(0)` 全仓
+不存在；`0x03`（开蓝牙窗）接受即空操作、`0x06`（设 BLE 模式）`mode=1` 接受 / `mode=0`（省电）
+**按 §5.1 铁律拒绝**（状态 2）。设备始终无线可达，坏帧不可能软变砖。
+
+**实现**（`atc1441_src/Firmware/src/`）：
+
+- `nfc.c` —— 在 v15.1 场检测之上加命令通道：
+  - FM11NC081 用户 EEPROM 基址 `0x0010`（16 位 I2C 地址，从机 0xAE）：`nfc_e2_read` /
+    `nfc_e2_write` 封装 `i2c_read_series` / `i2c_write_series`（写后 `WaitMs(10)` 沉降）。
+  - 帧格式 `[magic 0xA5][cmd][len][payload...][sum]`，`sum = 0xA5^cmd^len^payload`（8 位 XOR）。
+    **双形态接收**（对应速查卡 §3）：① 裸二进制（Data/自定义记录）；② ASCII 十六进制文本
+    如 `A50100A4`（Text 记录，推荐——`A5` 不会被 UTF-8 拆成两字节）。`valid_raw` /
+    `valid_text` 各自做 XOR 校验。
+  - `nfc_exec()` 分发 0x01/0x02/0x04/0x05/0x03/0x06，执行后把 `magic` 清零（写 0 到
+    `NFC_E2_BASE+off`）防重复执行；`nfc_write_status()` 把结果块写进保留区 `0x00E0`。
+  - 扫描只在**实际贴卡**时发生（`nfc_poll` 场检测未命中立即返回），不影响待机电流。
+  - 空贴（EEPROM 无合法帧）→ 维持 v15.1「翻下一页」语义，保证向后兼容。
+- `app.c` —— 无改动（仅 v15.1 已挂的 `nfc_poll` / `nfc_wake_prepare` / `nfc_gpio_reconfig`）。
+- `app_config.h` —— 版本号 `v15.2` + 数值版号 `FW_VERSION_MAJOR/MINOR`（写进状态块）。
+
+**边界与已知风险（真机验证项）**：
+
+- **EEPROM 地址映射未实测**：`0x0010` 基址、16 位地址读、写后 10 ms 沉降均来自 FM11NC081
+  数据手册与 HiHope 参考例程；真机上若读回全 0xFF 或错位，先抓 I2C 确认实际 NDEF 布局，
+  再调整 `NFC_E2_BASE` 与扫描窗口 `NFC_CMD_SCAN_LEN`。
+- **NDEF 文本编码陷阱**：手机 Text 记录会加 NDEF 头（TNF/类型长度/负载长度/类型 `T`），
+  纯文本 `A50100A4` 落进 EEPROM 时前面有几字节 NDEF 头——扫描循环靠 `magic 0xA5` 在
+  任意偏移命中仍能找到帧（已用 `for i` 滑窗），但首字节若恰在 4 字节对齐边界之外也覆盖。
+- **EEPROM 寿命**：每次贴卡都写 16 字节状态块 +（有命令时）1 字节 magic 清零，
+  FM11NC081 EEPROM 擦写约 10⁵–10⁶ 次；日常偶发贴卡可忽略，若要做高频压测需注意。
+- IRQ_N 极性、`nfc_ignore_until` 窗口同 v15.1，仍按最坏情况设计，实测可微调。
+
+**验证**：`tools/verify_v14_layout.py` 81 项 PASS（UI 未动，纯回归）；镜像 86680 B
+（v15.1 85596，+1084，来自命令解析 + I2C 读写字 + 状态块）；`_end_bss_ = 0x84efa1`
+**不变**（新增 RAM 变量 `nfc_last_cmd` / `nfc_last_res` 已编入 retention 区，零 SRAM 增量）；
+符号表确认 `nfc_poll` / `nfc_wake_prepare` / `nfc_gpio_reconfig` 已链入，且
+`i2c_read_series` / `i2c_write_series` / `set_time` / `app_get_page` / `app_set_page` /
+`get_battery_mv` 均被 `nfc_poll` 引用（链接通过即代码已进镜像）。
+
+**发布文件**：`firmware_releases/atc1441_3page_v15.2_2026-09-13_86680B.bin`
+**SHA256**：`2daf0f1c903d8219e6aa2a9276a5eedfec260f703cad6ed363fdcb29f285324d`
+**大小**：86680 字节
+**SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）
