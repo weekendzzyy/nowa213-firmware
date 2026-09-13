@@ -41,6 +41,9 @@ INK = (24, 24, 26)
 BAND_FILL = (250, 232, 218)
 BAND_EDGE = (214, 120, 60)
 BOX = (200, 30, 40)
+# v15.0: the panel's red layer (SSD1680 BWR).  Distinct from BOX, which is an
+# annotation colour; this one is what the e-paper actually shows as red.
+RED = (176, 38, 40)
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +88,23 @@ class Canvas(object):
             base = (y0 + y) * self.w
             for x, v in enumerate(row):
                 if v:
+                    self.p[base + x0 + x] = INK
+
+    def ink_two(self, rows_black, rows_red, x0, y0):
+        """v15.0: blit a black frame and a red frame together.
+
+        The panel resolves a BWR pixel from the pair of RAM bits, so the two
+        frames are drawn independently and must not overlap - which is exactly
+        what the renderer guarantees.  Red wins if they ever did, so a mistake
+        shows up as red rather than silently vanishing."""
+        for y in range(min(self.h - y0, len(rows_black), len(rows_red))):
+            base = (y0 + y) * self.w
+            rb_row = rows_black[y]
+            rr_row = rows_red[y]
+            for x in range(min(self.w - x0, len(rb_row), len(rr_row))):
+                if rr_row[x]:
+                    self.p[base + x0 + x] = RED
+                elif rb_row[x]:
                     self.p[base + x0 + x] = INK
 
     def blit_rgb(self, rows, x0, y0):
@@ -224,6 +244,9 @@ def main():
                          'panel the v14.0 layout was measured from')
     ap.add_argument('--zoom', type=int, default=3)
     ap.add_argument('--tag', default='v14', help='filename tag')
+    ap.add_argument('--page', type=int, default=1, choices=(1, 2),
+                    help='1 = the time face (default), 2 = the v15.0 month '
+                         'calendar, rendered in black AND red')
     args = ap.parse_args()
 
     face = Face()
@@ -231,6 +254,36 @@ def main():
     mac = tuple(int(args.mac[i:i + 2], 16) for i in (0, 2, 4))
     debug = tuple(int(v) for v in args.debug.split(',')) if args.debug else None
     t = stamp(args.date, args.time)
+
+    # --- v15.0 page 2: the month calendar ---------------------------------
+    # Two passes into two buffers, exactly as the firmware fills the panel's two
+    # RAMs, then composited so the preview shows what the e-paper will.
+    if args.page == 2:
+        W, H = L['FACE_W'], L['FACE_H']
+        VIS = L['FACE_VISIBLE_H']
+        os.makedirs(OUTDIR, exist_ok=True)
+        pb = new_buffer(face)
+        pr = new_buffer(face)
+        face.calendar_page(pb, W, H, t, args.mv, 0)
+        face.calendar_page(pr, W, H, t, args.mv, 1)
+        c = Canvas(W, VIS)
+        c.ink_two(bits(face, pb)[:VIS], bits(face, pr)[:VIS], 0, 0)
+        p = os.path.join(OUTDIR, 'page2_calendar_%s_zoom%d.png'
+                         % (args.tag, args.zoom))
+        c.save(p, args.zoom)
+        yy, mm, dd, wd = face.cal_date(t)
+        first = face.cal_weekday(yy, mm, 1)
+        rowsn = (first + face.cal_days_in_month(yy, mm) + 6) // 7
+        print('calendar %04d-%02d-%02d   today %d   grid: %d leading blank(s), '
+              '%d row(s)' % (yy, mm, dd, dd, first, rowsn))
+        print('  header rule y=%d, divider x=%d, info x=%d (%d px wide), '
+              'today box %d px, digits %d%%, suffix %d%%'
+              % (L['CAL_HEAD_Y'] + 16, L['CAL_DIVIDER_X'], L['CAL_INFO_X'],
+                 L['CAL_INFO_WIDTH'],
+                 L['CAL_COL_W'] - 2 * L['CAL_TODAY_BOX_INSET'],
+                 L['CAL_TODAY_RATIO'], L['CAL_TODAY_SUFFIX_RATIO']))
+        print('wrote %s  (%dx%d)' % (p, W * args.zoom, VIS * args.zoom))
+        return
 
     buf = new_buffer(face)
     hhmm = face.face(buf, L['FACE_W'], L['FACE_H'], t, args.mv, args.temp,

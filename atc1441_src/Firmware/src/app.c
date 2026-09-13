@@ -13,6 +13,7 @@
 #include "epd.h"
 #include "time.h"
 #include "bart_tif.h"
+#include "calendar.h"
 
 RAM uint8_t battery_level;
 RAM uint16_t battery_mv;
@@ -30,6 +31,44 @@ RAM uint8_t minute_refresh = 100;
 #define NIGHT_END_HOUR   6
 
 RAM uint8_t first_refresh_done = 0; // always paint once after power-up/reset
+
+// ---- v15.0 three-page display ------------------------------------------------
+// Which page the tag is showing.  Kept in RAM for speed and mirrored to flash
+// (page_state_save) so a battery pull or an OTA comes back on the same page.
+// A switch is not a redraw of the same content - the three pages share nothing -
+// so app_set_page() only flags a pending FULL refresh; the main loop takes it on
+// the next tick, deliberately even inside the night window, because a page
+// change is something the user asked for by hand.
+RAM uint8_t current_page = PAGE_TIME;
+RAM uint8_t page_switch_pending = 0;
+
+// The calendar and image pages have no per-minute content, so the only thing
+// that can change under them is the date - and only at midnight, when the grid
+// has to be laid out again (a new month may need six rows where the old one
+// needed five) and today's cell moves.  Tracked as the day-of-month, which
+// necessarily steps at midnight.
+RAM uint8_t day_shown = 0xFF;
+
+void app_set_page(uint8_t page)
+{
+    if (page < PAGE_TIME || page > PAGE_TIME + PAGE_COUNT - 1)
+        return;
+    current_page = page;
+    page_state_save(page);
+    page_switch_pending = 1;
+}
+
+uint8_t app_get_page(void)
+{
+    return current_page;
+}
+
+// Applies the page switch the hardware clock cannot see: reads the stored page
+// at boot.  (Split out so user_init_normal stays a list of init calls.)
+void app_page_restore(void)
+{
+    current_page = page_state_load();
+}
 
 // ---- v6.0 partial-window bookkeeping ----------------------------------------
 // v6.0 turns the per-minute repaint into a REAL partial refresh limited to the
@@ -127,6 +166,7 @@ _attribute_ram_code_ void user_init_normal(void)
     init_ble();
     init_flash();
     init_nfc();
+    app_page_restore(); // v15.0: come back on the page that was last selected
     // v4.0 clock-only: the user-image alternation is disabled, so the flash
     // image check is no longer needed at boot (see main_loop comment).
     // user_image_check_flash();
@@ -167,7 +207,9 @@ _attribute_ram_code_ void main_loop(void)
     }
 
     uint8_t current_minute = (get_time() / 60) % 60;
-    if (force_refresh || current_minute != minute_refresh)
+    // v15.0: a page switch is taken at once rather than waiting out the minute,
+    // so asking for another page over BLE feels immediate.
+    if (force_refresh || page_switch_pending || current_minute != minute_refresh)
     {
         minute_refresh = current_minute;
         uint8_t current_hour = ((get_time() / 60) / 60) % 24;
@@ -241,12 +283,75 @@ _attribute_ram_code_ void main_loop(void)
         // v5.0: the panel is driven only when it is actually visible/useful -
         // never before the first paint of this power cycle, and not at night.
         // ------------------------------------------------------------------
-        uint8_t paint = (force_refresh || !first_refresh_done || !night) ? 1 : 0;
+        // ------------------------------------------------------------------
+        // v15.0: which page is up, and does THIS page want this tick?
+        //
+        //   time      the v14.0 behaviour: partial every minute, full every
+        //             hour, plus the dead-band / BLE- triggered fulls.
+        //   calendar  only at midnight (the grid is laid out again, because a
+        //             new month can need six rows where the old one needed
+        //             five, and today's cell moves) or on a page switch.
+        //             Nothing else on it changes, so a per-minute repaint
+        //             would be pure waste.
+        //   image     never on a tick; only on a page switch or a new upload.
+        //
+        // A page switch overrides all of that and is always a FULL refresh:
+        // the pages share no pixels, so a partial would leave the old page
+        // visible around the new one.
+        // ------------------------------------------------------------------
+        uint8_t paint = 0;
+        uint8_t page_full = 0;
+
+        if (page_switch_pending)
+        {
+            page_switch_pending = 0;
+            paint = 1;
+            page_full = 1;
+        }
+        else if (current_page == PAGE_TIME)
+        {
+            paint = (force_refresh || !first_refresh_done || !night) ? 1 : 0;
+            page_full = full;
+        }
+        else if (current_page == PAGE_CALENDAR)
+        {
+            int cy, cm, cd, cwd;
+
+            cal_date(get_time(), &cy, &cm, &cd, &cwd);
+            if ((uint8_t)cd != day_shown)
+            {
+                /* midnight: the grid is laid out again (a new month may need
+                 * six rows where the old one needed five), so FULL. */
+                day_shown = (uint8_t)cd;
+                paint = 1;
+                page_full = 1;
+            }
+            else if (hour_changed && !night &&
+                     (current_hour % CAL_VOLT_REFRESH_HOURS) == 0)
+            {
+                /* v15.0: refresh just the voltage band, every
+                 * CAL_VOLT_REFRESH_HOURS, so the reading is not a day old.
+                 * PARTIAL - which only saves the gate scan here, both frames
+                 * are still sent.  See EPD_CAL_BWR_PARTIAL in epd.c. */
+                paint = 1;
+                page_full = 0;
+            }
+            if (!first_refresh_done)
+            {
+                paint = 1;
+                page_full = 1;
+            }
+        }
+        else /* PAGE_IMAGE */
+        {
+            paint = (!first_refresh_done) ? 1 : 0;
+            page_full = 1;
+        }
 
         // v12.0 forensics: tally only the full refreshes that are actually
         // painted, so the on-glass counters match the flashes the eye sees.
         // Done BEFORE epd_display() because that is what draws them.
-        if (paint && full && dbg_armed)
+        if (paint && page_full && dbg_armed)
         {
             if (cause_ble)    DBG_BUMP(dbg_ble);
             if (cause_temp)   DBG_BUMP(dbg_temp);
@@ -258,10 +363,10 @@ _attribute_ram_code_ void main_loop(void)
         if (paint)
         {
             // v14.0: freeze the displayed values until the next full refresh -
-            // see the "snapshot" block above.  `full` is known before the call,
-            // so the snapshot is taken on exactly the ticks that repaint the
-            // whole panel.
-            if (full)
+            // see the "snapshot" block above.  The calendar and image pages do
+            // not show them, but keeping the snapshot on the same rule stops a
+            // page switch from carrying a stale reading onto the time page.
+            if (page_full)
             {
                 shown_mv = battery_mv;
                 /* v14.2: the panel sensor, which is what v13.0 displayed and
@@ -274,7 +379,7 @@ _attribute_ram_code_ void main_loop(void)
                 shown_temp = (int8_t)EPD_read_temp();
             }
 
-            epd_display(get_time(), shown_mv, shown_temp, full);
+            epd_display(get_time(), shown_mv, shown_temp, page_full, current_page);
             first_refresh_done = 1;
         }
     }

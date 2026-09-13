@@ -39,7 +39,31 @@ void init_epd(void);
 uint8_t EPD_read_temp(void);
 void EPD_Display(unsigned char *image, int size, uint8_t full_or_partial);
 void epd_display_tiff(uint8_t *pData, int iSize);
-void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial);
+/* ---- v15.0 three-page display ---------------------------------------------
+ * The page is part of the display call because it decides both which refresh
+ * events the page subscribes to (app.c) and which renderer runs (epd.c).
+ * Switching pages is ALWAYS a full refresh: the three pages have nothing in
+ * common, so a partial refresh would merely leave the old page's ink around
+ * the new one. */
+#define PAGE_TIME     1
+#define PAGE_CALENDAR 2
+#define PAGE_IMAGE    3
+#define PAGE_COUNT    3
+
+/* The selected page lives in flash so it survives a battery pull and an OTA.
+ * Same scheme as the user image: the magic byte is written LAST, so losing
+ * power mid-write leaves the previous (still valid) value in place. */
+#define PAGE_STATE_FLASH_ADDR 0x7A000
+#define PAGE_STATE_MAGIC      0x50 /* 'P' */
+
+/* v15.0: how often the calendar page re-drives its voltage band.  Kept here
+ * rather than in epd_layout.h because app.c needs it, and app.c must not
+ * include epd_layout.h - that would duplicate the generated DSEG bitmap. */
+#define CAL_VOLT_REFRESH_HOURS 2
+uint8_t page_state_load(void);
+void page_state_save(uint8_t page);
+
+void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial, uint8_t page);
 void epd_set_sleep(void);
 uint8_t epd_state_handler(void);
 void epd_display_char(uint8_t data);

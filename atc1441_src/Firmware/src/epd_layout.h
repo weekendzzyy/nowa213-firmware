@@ -251,3 +251,163 @@
 #if EPD_WIN_GATE_FIRST < 0 || EPD_WIN_GATE_LAST > 295
 #error "gate window: driven gates must stay within 0..295 (SSD1680 p.36)"
 #endif
+
+/* ===========================================================================
+ * v15.0 page 2 - the month calendar.
+ *
+ * Two panes: the date grid on the left, an info column on the right.  The glass
+ * is still 250 x 122, and the grid carries a weekday header plus up to six date
+ * rows (a 31-day month starting on Sunday spans six weeks), so the row pitch is
+ * what makes six rows fit:
+ *
+ *     header   y = CAL_HEAD_Y (2)                16 px -> ends 18
+ *     row i    y = CAL_ROW0_Y (19) + CAL_ROW_H*i   six rows -> 19 .. 120
+ *
+ * 120 <= 122, so the last row's ink is on the glass.  The pitch is 1 px more
+ * than the 16 px glyph so the rows read as rows.
+ *
+ * The grid is Monday-first (decision D3), so a month whose 1st is not a Monday
+ * leaves leading cells EMPTY.  That offset is derived at render time from
+ * cal_date() - never stored - so it cannot drift.
+ * ===========================================================================
+ */
+#define CAL_COLS        7
+/* 23 px per column.  It was briefly 19 to fit a widened "2026年12月" title -
+ * that layout was rejected, so the grid gets its width back. */
+#define CAL_COL_W       23                 /* 7 * 23 = 161 */
+#define CAL_GRID_W      (CAL_COLS * CAL_COL_W)
+
+#define CAL_DIVIDER_X   CAL_GRID_W         /* vertical rule, glass x 161 */
+#define CAL_HEAD_Y      2
+#define CAL_ROW0_Y      19
+#define CAL_ROW_H       17
+#define CAL_ROWS_MAX    6
+
+/* The info column: year+month, today's date (enlarged), the lunar date and the
+ * next solar term.  Left aligned on CAL_INFO_X, and CAL_INFO_RIGHT_X is the
+ * last column any of its strings may reach.  It is the glass edge here, not the
+ * 231 band edge of the time page: this page takes no per-minute partial
+ * refresh, so nothing has to stay inside the band. */
+#define CAL_INFO_X       (CAL_DIVIDER_X + 4)
+#define CAL_INFO_RIGHT_X 249
+/* The info column's inner width, for centring runs inside it. */
+#define CAL_INFO_WIDTH   (CAL_INFO_RIGHT_X - CAL_INFO_X + 1)
+
+/* rows of the info column (top of each).  Five lines now, evenly spaced, with
+ * the voltage at the bottom.  Every one of them is centred in the column. */
+#define CAL_INFO_TITLE_Y 2
+#define CAL_INFO_TODAY_Y 18
+#define CAL_INFO_LUNAR_Y 62
+#define CAL_INFO_TERM_Y  82
+#define CAL_INFO_VOLT_Y  102
+
+/* The voltage line.  "9999mV" is the widest string the row-1 clamp allows, so
+ * the advance is fixed and the centred x is a CONSTANT - which is what lets the
+ * partial-refresh window below be derived instead of guessed. */
+#define CAL_VOLT_ADV  48
+#define CAL_VOLT_X    (CAL_INFO_X + (CAL_INFO_WIDTH - CAL_VOLT_ADV) / 2)
+
+/* The calendar page's own partial window: the vertical band carrying the
+ * voltage line, and nothing else.  The page is otherwise midnight-only, so the
+ * band is re-driven every CAL_VOLT_REFRESH_HOURS to keep the reading fresh -
+ * 48 gates against the time page's 95.
+ *
+ * Two things the caller must respect:
+ *   * a partial refresh re-drives EVERY row inside the band, so the buffer it
+ *     is given has to hold the whole page, not just the voltage - which is what
+ *     epd_display() rebuilds;
+ *   * the band also crosses the enlarged "13日", so the red frame has to be
+ *     rebuilt too.  Whether the (single-colour) partial waveform re-drives RED
+ *     correctly is unverified on this panel - EPD_CAL_BWR_PARTIAL switches the
+ *     page back to full refreshes if it turns out it does not. */
+/* CAL_VOLT_REFRESH_HOURS lives in epd.h - app.c needs it for its event
+ * dispatch and must not pull this header in (it would duplicate the DSEG
+ * bitmap in flash). */
+#define CAL_WIN_GLASS_FIRST   (CAL_VOLT_X)
+#define CAL_WIN_GLASS_LAST    (CAL_VOLT_X + CAL_VOLT_ADV - 1)
+#define CAL_WIN_GATE_FIRST    (CAL_WIN_GLASS_FIRST + EPD_WIN_GATE_OFFSET)
+#define CAL_WIN_GATE_LAST     (CAL_WIN_GLASS_LAST + EPD_WIN_GATE_OFFSET)
+#define CAL_WIN_GATES         (CAL_WIN_GATE_LAST - CAL_WIN_GATE_FIRST + 1)
+
+/* Today's date is drawn in two pieces: the digits at CAL_TODAY_RATIO and the
+ * 日 suffix at CAL_TODAY_SUFFIX_RATIO.
+ *
+ * The suffix is 100 (i.e. full size) on purpose.  It was tried at 50, to make
+ * the digits dominate harder, and the render settled it: a Han glyph at 8 px
+ * loses its strokes and simply disappears - "13日" read as "13".  So the
+ * contrast comes from the DIGITS growing, not from the suffix shrinking. */
+#define CAL_TODAY_RATIO         250
+#define CAL_TODAY_SUFFIX_RATIO  100
+
+/* The 日 gets lifted this many px PAST cell-bottom alignment, because the INK
+ * bottoms do not coincide: Unifont draws the digits' ink on rows 4..13 of the
+ * 16-row cell (3 empty rows below) while 日 fills rows 1..15.  At the today
+ * line's 250% those 3 empty rows are 5 px, so plain cell-bottom alignment left
+ * the 日 hanging 5 px below the digits' last ink.  Measured from the bitmaps,
+ * not eyeballed - tools/epd_face_model.py reproduces the numbers. */
+#define CAL_TODAY_SUFFIX_LIFT    5
+
+/* Everything in the info column is drawn at ONE size: the title, the lunar
+ * date, the solar term and the voltage all share it.
+ *
+ * The title's Han was briefly trimmed to 75 to balance the digits' 8 px width
+ * against the Han's 16, but that made the title smaller than the lines below
+ * it - its own kind of raggedness.  One size for the whole column wins.  The
+ * digits being narrower than the Han is a property of Unifont, not of this
+ * layout; the only cure is widening the digits, which needs a wider info column
+ * and a narrower calendar grid. */
+/* The title "2026年9月": digits at 100, the Han trimmed to 75.
+ *
+ * This is the ONLY way to even the two halves out without touching the grid:
+ * growing the digits needs 112 px of an 85 px column, but shrinking the Han
+ * only FREES width - "2026年9月" drops from 72 px to 64 px and the calendar
+ * keeps its 23 px columns.
+ *
+ * 75 is the floor in practice: a Han glyph is drawn on a 16x16 cell, so 50%
+ * leaves 8x8 and the strokes merge into a blob - the 日 test at 50% vanished
+ * entirely.  75% (12x12) still reads. */
+/* 88% of the 8 px digit advance is exactly 7 px - dropping the LAST column is
+ * a clean cut, unlike 80% (6 px) which samples unevenly and roughs up the
+ * edges. */
+#define CAL_INFO_DIGIT_RATIO     88
+#define CAL_INFO_HAN_RATIO       75
+
+/* Trimming the today box by this many px per side keeps the reversed block off
+ * its neighbours' ink. */
+#define CAL_TODAY_BOX_INSET 2
+
+/* The info column's longest string: "2026年12月" is 4 digits + 年 + 2 digits +
+ * 月 = 8 codepoints, plus NUL.  One buffer serves the title, the lunar date
+ * (CAL_LUNAR_MAX) and the term (CAL_TERM_MAX); 10 covers all three. */
+#define CAL_INFO_MAX 10
+
+#if CAL_GRID_W + 1 >= FACE_W
+#error "calendar: the grid leaves no room for the info column"
+#endif
+#if CAL_ROW0_Y + CAL_ROWS_MAX * CAL_ROW_H > FACE_VISIBLE_H
+#error "calendar: six date rows run off the glass"
+#endif
+#if CAL_INFO_X >= CAL_INFO_RIGHT_X
+#error "calendar: the info column has no width"
+#endif
+#if CAL_TODAY_RATIO < 100 || CAL_TODAY_RATIO > 400
+#error "calendar: today-date ratio out of range"
+#endif
+#if CAL_TODAY_SUFFIX_RATIO < 25 || CAL_TODAY_SUFFIX_RATIO > 100
+#error "calendar: today-suffix ratio out of range"
+#endif
+#if CAL_INFO_TODAY_Y + 16 * CAL_TODAY_RATIO / 100 > CAL_INFO_LUNAR_Y
+#error "calendar: the enlarged today date overlaps the lunar line"
+#endif
+#if CAL_INFO_VOLT_Y + 16 > FACE_VISIBLE_H
+#error "calendar: the voltage line runs off the glass"
+#endif
+#if CAL_INFO_VOLT_Y < CAL_INFO_TERM_Y + 16
+#error "calendar: the voltage line overlaps the solar-term line"
+#endif
+#if CAL_WIN_GATE_LAST > 295
+#error "calendar: the voltage band runs past the last gate (SSD1680 p.36)"
+#endif
+#if CAL_WIN_GATES < 16
+#error "calendar: the voltage band is narrower than the 16-line MUX minimum"
+#endif

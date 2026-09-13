@@ -6,6 +6,7 @@
 
 #include "epd.h"
 #include "ble.h"
+#include "app.h"
 
 extern uint8_t *epd_temp;
 
@@ -59,6 +60,22 @@ int epd_ble_handle_write(void *p)
 		return 0;
 	case 0x04: // decode & display a TIFF image
 		epd_display_tiff(epd_buffer, byte_pos);
+		return 0;
+	// v15.0: go to a specific page.  payload[1] = 1 time / 2 calendar / 3 image.
+	// The switch is persisted to flash and taken by the main loop on its next
+	// pass (app_set_page flags it), so this returns without touching the panel.
+	case 0x05:
+		ASSERT_MIN_LEN(payload_len, 2);
+		app_set_page(payload[1]);
+		return 0;
+	// v15.0: cycle to the next page, wrapping after the last one.
+	case 0x06:
+	{
+		uint8_t next = app_get_page() + 1;
+		if (next > PAGE_COUNT)
+			next = PAGE_TIME;
+		app_set_page(next);
+	}
 		return 0;
 	default:
 		return 0;

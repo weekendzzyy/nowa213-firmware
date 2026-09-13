@@ -55,6 +55,13 @@ extern const uint8_t ucMirror[];
  */
 #define EPD_USE_REFRESH_DEBUG 0
 
+/* v15.0: 1 = the calendar page re-drives only the voltage band every
+ * CAL_VOLT_REFRESH_HOURS, instead of rebuilding the whole panel.  Set to 0 to
+ * go back to full refreshes: whether the single-colour partial waveform
+ * re-drives the RED layer correctly is unverified on this panel, and a faint
+ * "3日" after a 2-hour tick is the symptom that would condemn it. */
+#define EPD_CAL_BWR_PARTIAL 1
+
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
 RAM uint8_t epd_update_state = 0;
@@ -126,6 +133,36 @@ void user_image_save(void)
 void user_image_restore(void)
 {
 	flash_read_page(USER_IMG_FLASH_ADDR + 4, EPD_DISPLAY_SIZE, epd_buffer);
+}
+
+/* ---- v15.0 page state (flash, its own 4 KB sector at 0x7A000) -------------
+ * One magic byte plus one page byte, magic written last so an interrupted
+ * save keeps the previous valid page.  A sector erase is the price of the
+ * update, which is fine: the page only changes when the user asks for it. */
+uint8_t page_state_load(void)
+{
+	uint8_t magic = 0;
+	uint8_t page = PAGE_TIME;
+
+	flash_read_page(PAGE_STATE_FLASH_ADDR, 1, &magic);
+	if (magic == PAGE_STATE_MAGIC)
+	{
+		flash_read_page(PAGE_STATE_FLASH_ADDR + 1, 1, &page);
+		if (page < PAGE_TIME || page > PAGE_TIME + PAGE_COUNT - 1)
+			page = PAGE_TIME;
+	}
+	return page;
+}
+
+void page_state_save(uint8_t page)
+{
+	uint8_t magic = PAGE_STATE_MAGIC;
+
+	if (page < PAGE_TIME || page > PAGE_TIME + PAGE_COUNT - 1)
+		page = PAGE_TIME;
+	flash_erase_sector(PAGE_STATE_FLASH_ADDR);
+	flash_write_page(PAGE_STATE_FLASH_ADDR + 1, 1, &page);
+	flash_write_page(PAGE_STATE_FLASH_ADDR, 1, &magic);
 }
 
 // With this we can force a display if it wasnt detected correctly
@@ -464,7 +501,234 @@ static void epd_face(uint8_t *scr, int wp, int ht, uint32_t t, uint16_t mv,
         epd_rune(scr, wp, ht, ROW3_RUNE_X, ROW3_Y + 1);
 }
 
-_attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial)
+/* ===========================================================================
+ * v15.0 page 2 - the month calendar.  Coordinates come from the CAL_* block in
+ * epd_layout.h; this file only draws.
+ *
+ * It is drawn TWICE per refresh: once with red_only = 0 (everything black,
+ * including the filled box under today) and once with red_only = 1 (the weekend
+ * cells and the enlarged today date).  The two passes fill the two RAMs the
+ * SSD1680 keeps - a BWR pixel is the pair (black bit, red bit), so a glyph that
+ * is meant to be red must NOT also be painted black, or the controller resolves
+ * it the other way.  That is also why the today box and its date are skipped in
+ * the red pass: the box is black and the date is erased out of it.
+ *
+ * Everything here is derived from cal_date()/cal_weekday() at draw time - the
+ * grid's leading offset, the weekend columns and today's cell are never stored.
+ * ===========================================================================
+ */
+static void fill_rect(uint8_t *scr, int wpitch, int height, int x, int y,
+                      int w, int h)
+{
+    int i, j;
+
+    for (j = 0; j < h; j++)
+    {
+        int yy = y + j;
+
+        if (yy < 0 || yy >= height)
+            continue;
+        for (i = 0; i < w; i++)
+        {
+            int xx = x + i;
+
+            if (xx < 0 || xx >= wpitch)
+                continue;
+            scr[(yy >> 3) * wpitch + xx] |= (uint8_t)(1 << (yy & 7));
+        }
+    }
+}
+
+/* column index -> tm_wday.  The grid is Monday-first, so column 0 is Monday and
+ * column 6 is Sunday; 0 (Sunday) is the last column, not the first. */
+#define CAL_COL_WDAY(i) (((i) == CAL_COLS - 1) ? 0 : (i) + 1)
+#define CAL_IS_WEEKEND(i) (CAL_COL_WDAY(i) == 0 || CAL_COL_WDAY(i) == 6)
+
+/* The info column's strings vary in length (1日 .. 30日, 小寒 .. 大寒), so a
+ * shared left edge would read as a ragged block.  Each line is centred on
+ * CAL_INFO_WIDTH instead - see the constant, which is also what makes the
+ * voltage's x a compile-time number. */
+static void info_center(uint8_t *scr, int wp, int ht, const uint16_t *s, int sc,
+                        int y)
+{
+    int x = CAL_INFO_X + (CAL_INFO_WIDTH - epd_utext_width(s) * sc / 100) / 2;
+
+    epd_utext_scale(scr, wp, ht, x, y, s, sc);
+}
+
+/* Draw a mixed run - ASCII digits and Han glyphs - with the two scaled
+ * DIFFERENTLY, centred in the info column.
+ *
+ * Unifont gives ASCII an 8 px advance and Han 16 px, so a single scale can
+ * never make the digits look as large as the characters; "13日" and "2026年9月"
+ * both need the digits to grow while the Han stays put (or shrinks).  Width is
+ * summed with the same advances the blitter uses, so the centring cannot
+ * disagree with what is drawn. */
+static int info_center_mixed(uint8_t *scr, int wp, int ht, const uint16_t *s,
+                             int a_ratio, int h_ratio, int y, int align)
+{
+    int w = 0, i, x, max_h = 0;
+
+    for (i = 0; s[i]; i++)
+    {
+        int r = (s[i] < 0x2E80u) ? a_ratio : h_ratio;
+        int h = 16 * r / 100;
+
+        w += (s[i] < 0x2E80u ? 8 : 16) * r / 100;
+        if (h > max_h)
+            max_h = h;
+    }
+    x = CAL_INFO_X + (CAL_INFO_WIDTH - w) / 2;
+
+    /* align = 0 centres a smaller glyph in the run; align = 1 drops it to the
+     * run's BOTTOM edge.  Today's "13日" wants the latter: the number is the
+     * focus and the 日 should sit on its foot, not float in the middle. */
+    for (i = 0; s[i]; i++)
+    {
+        uint16_t one[2];
+        int r = (s[i] < 0x2E80u) ? a_ratio : h_ratio;
+        int off = max_h - 16 * r / 100;
+
+        /* The lift goes to the SMALLER glyphs only.  The run's tallest glyphs
+         * define where the bottom IS; lifting them too just moves the whole
+         * line and leaves every relative offset exactly as wrong as before -
+         * which is exactly what the first attempt did. */
+        if (align && off > 0)
+            off -= CAL_TODAY_SUFFIX_LIFT;
+
+        one[0] = s[i];
+        one[1] = 0;
+        x = epd_utext_scale(scr, wp, ht, x, y + (align ? off : off / 2), one, r);
+    }
+    return x;
+}
+
+static void info_text_center(uint8_t *scr, int wp, int ht, const char *s, int y)
+{
+    /* Pure ASCII, so the digit ratio is the only one that applies to it - the
+     * voltage follows the same 80% as every other black numeral. */
+    int x = CAL_INFO_X
+            + (CAL_INFO_WIDTH - epd_text_width(s) * CAL_INFO_DIGIT_RATIO / 100)
+              / 2;
+
+    epd_text_scale(scr, wp, ht, x, y, s, CAL_INFO_DIGIT_RATIO);
+}
+
+static void epd_face_calendar(uint8_t *scr, int wp, int ht, uint32_t t,
+                              uint16_t mv, int red_only)
+{
+    uint16_t buf[CAL_INFO_MAX];
+    int y, m, d, wd, days, first, i, n, x;
+
+    cal_date(t, &y, &m, &d, &wd);
+
+    if (!red_only)
+    {
+        /* the divider and the rule under the weekday header */
+        fill_rect(scr, wp, ht, CAL_DIVIDER_X, 0, 1, FACE_VISIBLE_H);
+        fill_rect(scr, wp, ht, 0, CAL_HEAD_Y + 16, CAL_GRID_W, 1);
+    }
+
+    /* ---- weekday header: 一 二 三 四 五 六 日 ---- */
+    for (i = 0; i < CAL_COLS; i++)
+    {
+        if (CAL_IS_WEEKEND(i) != red_only)
+            continue;
+        x = i * CAL_COL_W + (CAL_COL_W - 16) / 2;
+        epd_glyph(scr, wp, ht, x, CAL_HEAD_Y, UF_WEEKDAY[CAL_COL_WDAY(i)]);
+    }
+
+    /* Outside the supported range the header still reads, but there is no grid
+     * to draw - same rule cal_row3() uses for row 3. */
+    if (!cal_year_supported(y))
+        return;
+
+    days = cal_days_in_month(y, m);
+    first = cal_weekday(y, m, 1); /* 0 = Monday: the leading cells of row 0 */
+
+    for (i = 1; i <= days; i++)
+    {
+        int cell = first + i - 1;
+        int row = cell / 7;
+        int col = cell % 7;
+        int today, cw, cx, cy;
+        char b[8];
+
+        if (row >= CAL_ROWS_MAX)
+            break;
+
+        sprintf(b, "%d", i);
+        cw = epd_text_width(b);
+        cx = col * CAL_COL_W + (CAL_COL_W - cw) / 2;
+        cy = CAL_ROW0_Y + row * CAL_ROW_H;
+        today = (i == d);
+
+        if (today)
+        {
+            /* The box takes the colour its weekday gets: black Mon-Fri, red at
+             * the weekend.  So it is drawn in the pass that OWNS that colour,
+             * and the date is erased out of it - in the black RAM erasing
+             * leaves white, and in the red RAM it leaves "no red", which is
+             * also white on the panel.  Nothing else may paint this cell. */
+            if (CAL_IS_WEEKEND(col) != red_only)
+                continue;
+            fill_rect(scr, wp, ht,
+                      col * CAL_COL_W + CAL_TODAY_BOX_INSET,
+                      cy - CAL_TODAY_BOX_INSET,
+                      CAL_COL_W - 2 * CAL_TODAY_BOX_INSET,
+                      16 + 2 * CAL_TODAY_BOX_INSET);
+            epd_text_inv(scr, wp, ht, cx, cy, b);
+        }
+        else if (CAL_IS_WEEKEND(col) == red_only)
+        {
+            epd_text(scr, wp, ht, cx, cy, b);
+        }
+    }
+
+    /* ---- info column ---- */
+    if (!red_only)
+    {
+        char vb[10];
+
+        n = 0;
+        n = put_num(buf, n, y);
+        buf[n++] = UF_C_YEAR;
+        n = put_num(buf, n, m);
+        buf[n++] = UF_C_MONTH;
+        buf[n] = 0;
+        info_center_mixed(scr, wp, ht, buf, CAL_INFO_DIGIT_RATIO,
+                          CAL_INFO_HAN_RATIO, CAL_INFO_TITLE_Y, 0);
+
+        n = cal_lunar_text(t, buf, CAL_INFO_MAX);
+        if (n > 0)
+            info_center_mixed(scr, wp, ht, buf, CAL_INFO_DIGIT_RATIO,
+                              CAL_INFO_HAN_RATIO, CAL_INFO_LUNAR_Y, 0);
+
+        n = cal_term_text(t, buf, CAL_INFO_MAX);
+        if (n > 0)
+            info_center_mixed(scr, wp, ht, buf, CAL_INFO_DIGIT_RATIO,
+                              CAL_INFO_HAN_RATIO, CAL_INFO_TERM_Y, 0);
+
+        /* The voltage, clamped the same way row 1 clamps it - CAL_VOLT_ADV is
+         * that clamp's widest result, which is what fixes the band the partial
+         * refresh drives. */
+        if (mv > ROW1_MV_MAX)
+            mv = ROW1_MV_MAX;
+        sprintf(vb, "%umV", mv);
+        info_text_center(scr, wp, ht, vb, CAL_INFO_VOLT_Y);
+    }
+    else
+    {
+        n = 0;
+        n = put_num(buf, n, d);
+        buf[n++] = UF_C_DAY;
+        buf[n] = 0;
+        info_center_mixed(scr, wp, ht, buf, CAL_TODAY_RATIO,
+                          CAL_TODAY_SUFFIX_RATIO, CAL_INFO_TODAY_Y, 1);
+    }
+}
+
+_attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial, uint8_t page)
 {
     if (epd_update_state)
         return;
@@ -508,6 +772,82 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
 
     obdCreateVirtualDisplay(&obd, resolution_w, resolution_h, epd_temp);
     obdFill(&obd, 0, 0); // fill with white
+
+    /* ---- v15.0 page dispatch ------------------------------------------
+     * Only the time page can take a per-minute PARTIAL refresh; the calendar
+     * and image pages are full-refresh only.  That is exactly why neither of
+     * them has to keep its content inside the per-minute gate band, and why
+     * switching pages is always a full refresh. */
+    if (page == PAGE_CALENDAR)
+    {
+        int size = resolution_w * resolution_h / 8;
+        /* full, unless the caller asked for the 2-hour voltage band - see
+         * EPD_CAL_BWR_PARTIAL above for why that can be turned off. */
+        uint8_t cal_partial = (uint8_t)(full_or_partial ? 0
+                                     : (EPD_CAL_BWR_PARTIAL ? 1 : 0));
+
+        /* Black frame first: once those bytes are out they live in the
+         * controller, so this single framebuffer can be rebuilt as the red
+         * frame and sent too.  See the BWR block comment in epd_bwr_213.c. */
+        epd_face_calendar(obd.ucScreen, resolution_w, resolution_h, time_is,
+                          battery_mv, 0);
+        FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
+
+        if (epd_model == 2)
+        {
+            uint8_t t2;
+
+            EPD_init();
+            EPD_POWER_ON();
+            WaitMs(5);
+            gpio_write(EPD_RESET, 0);
+            WaitMs(10);
+            gpio_write(EPD_RESET, 1);
+            WaitMs(10);
+
+            /* The band this partial refresh drives is the VOLTAGE one, not the
+             * time page's minute digits - that is what gate_first/gates are
+             * for.  Both frames are still sent in full: only the driven gate
+             * range shrinks, so a wrong window cannot tear the page, it can
+             * only fail to update. */
+            t2 = EPD_BWR_213_Begin(cal_partial, CAL_WIN_GATE_FIRST,
+                                   CAL_WIN_GATES);
+            EPD_BWR_213_Load(epd_buffer, size, 0x24);
+
+            obdFill(&obd, 0, 0);
+            epd_face_calendar(obd.ucScreen, resolution_w, resolution_h, time_is,
+                              battery_mv, 1);
+            FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
+            EPD_BWR_213_Load(epd_buffer, size, 0x26);
+
+            EPD_BWR_213_Activate(cal_partial);
+
+            epd_temperature = t2;
+            epd_temperature_is_read = 1;
+            epd_update_state = 1;
+        }
+        else
+        {
+            /* A panel with no red layer: draw the red pass in black on top. */
+            epd_face_calendar(obd.ucScreen, resolution_w, resolution_h, time_is,
+                              battery_mv, 1);
+            FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
+            EPD_Display(epd_buffer, size, 1);
+        }
+        return;
+    }
+
+    if (page == PAGE_IMAGE)
+    {
+        /* The uploaded image is 1bpp and already in panel column order (the
+         * uploader mirrors it), so it goes straight out - no OBD, no red. */
+        if (has_user_image)
+            user_image_restore();
+        else
+            memset(epd_buffer, 0xff, epd_buffer_size);
+        EPD_Display(epd_buffer, resolution_w * resolution_h / 8, 1);
+        return;
+    }
 
     /* The face is drawn from a plain function so that the RAM copy of this one
      * stays small - SRAM is the scarcest resource in this build. */

@@ -739,43 +739,29 @@ class Face(object):
     def row3(self, t):
         """The row-3 codepoints, or [] when the date is outside the range.
 
-        Mirrors cal_row3() including its CAL_ROW3_MAX scratch array and the
-        n >= maxn bail-out."""
-        c, ch = self.cal, self.ch
+        Composed from lunar_text()/term_text() - the same two the calendar page
+        uses - mirroring cal_row3(), which v15.0 refactored the same way so the
+        time page and the calendar page cannot disagree about the lunar date."""
         maxn = self.ch_maxn
-        y, m, d, _ = self.cal_date(t)
-        if y < c['CAL_YEAR_FIRST'] or y > c['CAL_YEAR_LAST']:
-            return []
-        lun = self.lunar_from_solar(y, m, d)
-        if lun is None:
-            return []
-        lm, ld, leap = lun
-        if not (1 <= lm <= 12 and 1 <= ld <= 30):
+        lun = self.lunar_text(t)
+        if not lun:
             return []
 
         tmp = Arr(maxn)
         n = 0
-        if leap:
-            tmp[n] = ch['UF_C_LEAP']; n += 1
-        tmp[n] = self.lunar_month[lm]; n += 1
-        tmp[n] = ch['UF_C_MONTH']; n += 1
-        n = self.put_lunar_day(tmp, n, ld)
+        for v in lun:
+            tmp[n] = v
+            n += 1
 
-        nt = self.next_term(y, m, d)
-        if nt is not None:
-            term, ahead = nt
-            tmp[n] = ord(' '); n += 1
-            if ahead == 0:
-                tmp[n] = ch['UF_C_JIN']; n += 1
-                tmp[n] = ch['UF_C_DAY']; n += 1
-            else:
-                if ahead >= 10:
-                    tmp[n] = ord('0') + ahead // 10; n += 1
-                tmp[n] = ord('0') + ahead % 10; n += 1
-                tmp[n] = ch['UF_C_TIAN']; n += 1
-                tmp[n] = ch['UF_C_HOU']; n += 1
-            tmp[n] = self.term[term][0]; n += 1
-            tmp[n] = self.term[term][1]; n += 1
+        term = self.term_text(t)
+        # Worst case is 5 + 1 + 6 = 12 inside CAL_ROW3_MAX; the guard mirrors
+        # the C's, so a future longer term degrades to "no term" not to a crash.
+        if term and n + 1 + len(term) < maxn:
+            tmp[n] = ord(' ')
+            n += 1
+            for v in term:
+                tmp[n] = v
+                n += 1
 
         if n >= maxn:
             return []
@@ -836,6 +822,297 @@ class Face(object):
             self.rune(buf, wpitch, height, self.row3_rune_x(),
                       L['ROW3_Y'] + 1)
         return hhmm
+
+    # =======================================================================
+    # v15.0 page 2: the month calendar, and the drawing primitives it needs
+    # =======================================================================
+    def uf_blit_ex(self, buf, wpitch, height, x, ytop, data, blob, ncols,
+                   ratio=100, erase=False):
+        """Mirror of uf_blit_ex(): percentage scaling + an erase mode.
+
+        ratio=100, erase=False is uf_blit() exactly, bounds guard included.
+        A percentage rather than a multiplier: Unifont's ASCII is 8 px wide and
+        its Han 16, so making digits match characters needs the two scaled
+        differently within one string.
+        """
+        if data is None or blob is None or ncols <= 0 or ratio <= 0:
+            return
+
+        if ratio == 100:
+            if x < 0 or x + ncols > wpitch or ytop < 0 or ytop + 15 >= height:
+                return
+            off = ytop & 7
+            r0 = ytop >> 3
+            lastrow = height >> 3
+            p0 = r0 * wpitch + x
+            for c in range(ncols):
+                word = data[blob + 2 * c] | (data[blob + 2 * c + 1] << 8)
+                b0 = (word << off) & 0xFF
+                b1 = (word >> (8 - off)) & 0xFF
+                if b0:
+                    buf[p0 + c] = (buf[p0 + c] & ~b0 & 0xFF) if erase \
+                        else (buf[p0 + c] | b0)
+                if b1 and r0 + 1 < lastrow:
+                    i = p0 + c + wpitch
+                    buf[i] = (buf[i] & ~b1 & 0xFF) if erase else (buf[i] | b1)
+                if off and r0 + 2 < lastrow:
+                    b2 = (word >> (16 - off)) & 0xFF
+                    if b2:
+                        i = p0 + c + 2 * wpitch
+                        buf[i] = (buf[i] & ~b2 & 0xFF) if erase \
+                            else (buf[i] | b2)
+            return
+
+        # nearest neighbour: output column/row o samples source o*100/ratio
+        out_cols = ncols * ratio // 100
+        out_rows = 16 * ratio // 100
+        for c in range(out_cols):
+            sc = c * 100 // ratio
+            if sc >= ncols:
+                break
+            word = data[blob + 2 * sc] | (data[blob + 2 * sc + 1] << 8)
+            for r in range(out_rows):
+                sr = r * 100 // ratio
+                if sr >= 16 or not (word & (1 << sr)):
+                    continue
+                xx = x + c
+                if xx < 0 or xx >= wpitch:
+                    continue
+                yy = ytop + r
+                if yy < 0 or yy >= height:
+                    continue
+                i = (yy >> 3) * wpitch + xx
+                if erase:
+                    buf[i] &= ~(1 << (yy & 7)) & 0xFF
+                else:
+                    buf[i] |= 1 << (yy & 7)
+
+    def glyph_scale(self, buf, wpitch, height, x, ytop, cp, ratio):
+        blob, ncols, adv = self.uf_find(cp)
+        self.uf_blit_ex(buf, wpitch, height, x, ytop, self.bits, blob, ncols,
+                        ratio=ratio)
+        return x + adv * ratio // 100
+
+    def text_scale(self, buf, wpitch, height, x, ytop, s, ratio):
+        for ch in s:
+            x = self.glyph_scale(buf, wpitch, height, x, ytop, ord(ch), ratio)
+        return x
+
+    def utext_scale(self, buf, wpitch, height, x, ytop, cps, ratio):
+        for cp in cps:
+            x = self.glyph_scale(buf, wpitch, height, x, ytop, cp, ratio)
+        return x
+
+    def text_inv(self, buf, wpitch, height, x, ytop, s):
+        """Mirror of epd_text_inv() - clears ink, for the reversed today box."""
+        for ch in s:
+            blob, ncols, adv = self.uf_find(ord(ch))
+            self.uf_blit_ex(buf, wpitch, height, x, ytop, self.bits, blob,
+                            ncols, erase=True)
+            x += adv
+        return x
+
+    def fill_rect(self, buf, wpitch, height, x, y, w, h):
+        for j in range(h):
+            yy = y + j
+            if yy < 0 or yy >= height:
+                continue
+            base = (yy >> 3) * wpitch
+            mask = 1 << (yy & 7)
+            for i in range(w):
+                xx = x + i
+                if 0 <= xx < wpitch:
+                    buf[base + xx] |= mask
+
+    def cal_weekday(self, y, m, d):
+        """0 = Monday, which is the grid's first column (cal_date() gives 0=Sun)."""
+        days = self.days_from_civil(y, m, d)
+        return (((days % 7) + 11) % 7 + 6) % 7
+
+    def cal_days_in_month(self, y, m):
+        md = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        if not (1 <= m <= 12):
+            return 0
+        last = md[m]
+        if m == 2 and ((y % 4 == 0 and y % 100 != 0) or y % 400 == 0):
+            last = 29
+        return last
+
+    def cal_year_supported(self, y):
+        c = self.cal
+        return c['CAL_YEAR_FIRST'] <= y <= c['CAL_YEAR_LAST']
+
+    def lunar_text(self, t):
+        """Mirror of cal_lunar_text(): 八月初二, or [] out of range."""
+        ch = self.ch
+        y, m, d, _ = self.cal_date(t)
+        if not self.cal_year_supported(y):
+            return []
+        lun = self.lunar_from_solar(y, m, d)
+        if lun is None:
+            return []
+        lm, ld, leap = lun
+        if not (1 <= lm <= 12 and 1 <= ld <= 30):
+            return []
+
+        tmp = Arr(8)
+        n = 0
+        if leap:
+            tmp[n] = ch['UF_C_LEAP']; n += 1
+        tmp[n] = self.lunar_month[lm]; n += 1
+        tmp[n] = ch['UF_C_MONTH']; n += 1
+        n = self.put_lunar_day(tmp, n, ld)
+        return tmp.slice(n)
+
+    def term_text(self, t):
+        """Mirror of cal_term_text(): 11天后秋分 / 今日秋分, or []."""
+        ch = self.ch
+        y, m, d, _ = self.cal_date(t)
+        nt = self.next_term(y, m, d)
+        if nt is None:
+            return []
+        term, ahead = nt
+
+        tmp = Arr(8)
+        n = 0
+        if ahead == 0:
+            tmp[n] = ch['UF_C_JIN']; n += 1
+            tmp[n] = ch['UF_C_DAY']; n += 1
+        else:
+            if ahead >= 10:
+                tmp[n] = ord('0') + ahead // 10; n += 1
+            tmp[n] = ord('0') + ahead % 10; n += 1
+            tmp[n] = ch['UF_C_TIAN']; n += 1
+            tmp[n] = ch['UF_C_HOU']; n += 1
+        tmp[n] = self.term[term][0]; n += 1
+        tmp[n] = self.term[term][1]; n += 1
+        return tmp.slice(n)
+
+    def info_center(self, buf, wpitch, height, cps, ratio, y):
+        """Centre a codepoint run in the info column - mirrors info_center()."""
+        w = self.utext_width(cps) * ratio // 100
+        x = self.L['CAL_INFO_X'] + (self.L['CAL_INFO_WIDTH'] - w) // 2
+        self.utext_scale(buf, wpitch, height, x, y, cps, ratio)
+
+    def info_center_mixed(self, buf, wpitch, height, cps, a_ratio, h_ratio, y,
+                          align=0):
+        """Mirror of info_center_mixed(): ASCII and Han scaled APART, centred.
+
+        align = 0 centres a smaller glyph in the run, 1 drops it to the run's
+        bottom edge (today's "13日" wants the 日 on the number's foot)."""
+        w = 0
+        max_h = 0
+        for cp in cps:
+            r = a_ratio if cp < 0x2E80 else h_ratio
+            w += (8 if cp < 0x2E80 else 16) * r // 100
+            max_h = max(max_h, 16 * r // 100)
+        x = self.L['CAL_INFO_X'] + (self.L['CAL_INFO_WIDTH'] - w) // 2
+        for cp in cps:
+            r = a_ratio if cp < 0x2E80 else h_ratio
+            off = max_h - 16 * r // 100
+            if align and off > 0:
+                off -= self.L['CAL_TODAY_SUFFIX_LIFT']
+            x = self.utext_scale(buf, wpitch, height, x,
+                                 y + (off if align else off // 2), [cp], r)
+        return x
+
+    def info_text_center(self, buf, wpitch, height, s, y):
+        """ASCII counterpart - mirrors info_text_center()."""
+        r = self.L['CAL_INFO_DIGIT_RATIO']
+        w = self.text_width(s) * r // 100
+        x = self.L['CAL_INFO_X'] + (self.L['CAL_INFO_WIDTH'] - w) // 2
+        self.text_scale(buf, wpitch, height, x, y, s, r)
+
+    def calendar_page(self, buf, wpitch, height, t, mv, red_only):
+        """Mirror of epd_face_calendar().
+
+        red_only picks the pass: 0 draws everything that is black (including the
+        filled today box), 1 draws the weekend cells and the enlarged today date
+        - the two frames the SSD1680 keeps in its black and red RAMs."""
+        L = self.L
+        ch = self.ch
+        y, m, d, _ = self.cal_date(t)
+
+        def wday(col):
+            return 0 if col == L['CAL_COLS'] - 1 else col + 1
+
+        def weekend(col):
+            return wday(col) in (0, 6)
+
+        if not red_only:
+            self.fill_rect(buf, wpitch, height, L['CAL_DIVIDER_X'], 0, 1,
+                           L['FACE_VISIBLE_H'])
+            self.fill_rect(buf, wpitch, height, 0, L['CAL_HEAD_Y'] + 16,
+                           L['CAL_GRID_W'], 1)
+
+        for i in range(L['CAL_COLS']):
+            if weekend(i) != bool(red_only):
+                continue
+            x = i * L['CAL_COL_W'] + (L['CAL_COL_W'] - 16) // 2
+            self.glyph(buf, wpitch, height, x, L['CAL_HEAD_Y'],
+                       self.weekday[wday(i)])
+
+        if not self.cal_year_supported(y):
+            return
+
+        days = self.cal_days_in_month(y, m)
+        first = self.cal_weekday(y, m, 1)
+        for i in range(1, days + 1):
+            cell = first + i - 1
+            row, col = divmod(cell, 7)
+            if row >= L['CAL_ROWS_MAX']:
+                break
+            b = '%d' % i
+            cw = self.text_width(b)
+            cx = col * L['CAL_COL_W'] + (L['CAL_COL_W'] - cw) // 2
+            cy = L['CAL_ROW0_Y'] + row * L['CAL_ROW_H']
+            if i == d:
+                # The box takes the colour its weekday gets, so it is drawn in
+                # the pass that owns that colour - see epd_face_calendar.
+                if weekend(col) != bool(red_only):
+                    continue
+                self.fill_rect(buf, wpitch, height,
+                               col * L['CAL_COL_W'] + L['CAL_TODAY_BOX_INSET'],
+                               cy - L['CAL_TODAY_BOX_INSET'],
+                               L['CAL_COL_W'] - 2 * L['CAL_TODAY_BOX_INSET'],
+                               16 + 2 * L['CAL_TODAY_BOX_INSET'])
+                self.text_inv(buf, wpitch, height, cx, cy, b)
+            elif weekend(col) == bool(red_only):
+                self.text(buf, wpitch, height, cx, cy, b)
+
+        if not red_only:
+            tb = Arr(L['CAL_INFO_MAX'])
+            n = self.put_num(tb, 0, y)
+            tb[n] = ch['UF_C_YEAR']; n += 1
+            n = self.put_num(tb, n, m)
+            tb[n] = ch['UF_C_MONTH']; n += 1
+            self.info_center_mixed(buf, wpitch, height, tb.slice(n),
+                                   L['CAL_INFO_DIGIT_RATIO'],
+                                   L['CAL_INFO_HAN_RATIO'],
+                                   L['CAL_INFO_TITLE_Y'], 0)
+            r = self.lunar_text(t)
+            if r:
+                self.info_center_mixed(buf, wpitch, height, r,
+                                       L['CAL_INFO_DIGIT_RATIO'],
+                                       L['CAL_INFO_HAN_RATIO'],
+                                       L['CAL_INFO_LUNAR_Y'], 0)
+            r = self.term_text(t)
+            if r:
+                self.info_center_mixed(buf, wpitch, height, r,
+                                       L['CAL_INFO_DIGIT_RATIO'],
+                                       L['CAL_INFO_HAN_RATIO'],
+                                       L['CAL_INFO_TERM_Y'], 0)
+            self.info_text_center(buf, wpitch, height,
+                                  '%dmV' % min(mv, L['ROW1_MV_MAX']),
+                                  L['CAL_INFO_VOLT_Y'])
+        else:
+            tb = Arr(L['CAL_INFO_MAX'])
+            n = self.put_num(tb, 0, d)
+            tb[n] = ch['UF_C_DAY']; n += 1
+            self.info_center_mixed(buf, wpitch, height, tb.slice(n),
+                                   L['CAL_TODAY_RATIO'],
+                                   L['CAL_TODAY_SUFFIX_RATIO'],
+                                   L['CAL_INFO_TODAY_Y'], 1)
 
 
 # ---------------------------------------------------------------------------

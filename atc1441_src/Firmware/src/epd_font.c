@@ -48,40 +48,118 @@ static const unsigned char *uf_find(uint32_t cp, int *cols, int *adv)
 }
 
 /* Blit `ncols` columns of a glyph so that its row 0 lands on row `ytop`.
- * Handles any ytop by shifting into the one, two or three byte rows it spans. */
+ * Handles any ytop by shifting into the one, two or three byte rows it spans.
+ *
+ * v15.0 adds two knobs, both needed by the month calendar:
+ *   ratio = 100            identical to the v14.0 blitter, still the fast path
+ *   ratio != 100           nearest neighbour, as a PERCENTAGE: 200 = 2x,
+ *                          150 = 1.5x, 50 = half.  Unifont draws ASCII at 8 px
+ *                          and Han at 16 px wide, so "make the digits as big as
+ *                          the characters" needs the two scaled differently -
+ *                          which a single integer scale cannot express.
+ *   erase = 1              clears ink instead of setting it, which is what
+ *                          punches the date out of the reversed today box.
+ */
+static void uf_blit_ex(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                       const unsigned char *blob, int ncols, int ratio, int erase)
+{
+    int c, r;
+
+    if (!blob || ncols <= 0 || ratio <= 0)
+        return;
+
+    if (ratio == 100)
+    {
+        int off, r0, lastrow;
+        uint8_t *p0;
+
+        if (x < 0 || x + ncols > wpitch || ytop < 0 || ytop + 15 >= height)
+            return;
+
+        off = ytop & 7;
+        r0 = ytop >> 3;
+        lastrow = height >> 3;
+        p0 = scr + r0 * wpitch + x;
+
+        for (c = 0; c < ncols; c++)
+        {
+            int word = blob[2 * c] | (blob[2 * c + 1] << 8);
+            uint8_t b0 = (uint8_t)((word << off) & 0xFF);
+            uint8_t b1 = (uint8_t)((word >> (8 - off)) & 0xFF);
+
+            if (erase)
+            {
+                if (b0)
+                    p0[c] &= (uint8_t)~b0;
+                if (b1 && r0 + 1 < lastrow)
+                    p0[c + wpitch] &= (uint8_t)~b1;
+                if (off && r0 + 2 < lastrow)
+                {
+                    uint8_t b2 = (uint8_t)((word >> (16 - off)) & 0xFF);
+                    if (b2)
+                        p0[c + 2 * wpitch] &= (uint8_t)~b2;
+                }
+            }
+            else
+            {
+                if (b0)
+                    p0[c] |= b0;
+                if (b1 && r0 + 1 < lastrow)
+                    p0[c + wpitch] |= b1;
+                if (off && r0 + 2 < lastrow)
+                {
+                    uint8_t b2 = (uint8_t)((word >> (16 - off)) & 0xFF);
+                    if (b2)
+                        p0[c + 2 * wpitch] |= b2;
+                }
+            }
+        }
+        return;
+    }
+
+    /* Generic nearest neighbour: output column/row o samples source o*100/ratio,
+     * so 200 duplicates every one and 50 drops every other one. */
+    {
+        int out_cols = ncols * ratio / 100;
+        int out_rows = 16 * ratio / 100;
+
+        for (c = 0; c < out_cols; c++)
+        {
+            int sc = c * 100 / ratio;
+            int word;
+
+            if (sc >= ncols)
+                break;
+            word = blob[2 * sc] | (blob[2 * sc + 1] << 8);
+
+            for (r = 0; r < out_rows; r++)
+            {
+                int sr = r * 100 / ratio;
+                int xx, yy;
+                uint8_t *p;
+
+                if (sr >= 16 || !(word & (1 << sr)))
+                    continue;
+                xx = x + c;
+                if (xx < 0 || xx >= wpitch)
+                    continue;
+                yy = ytop + r;
+                if (yy < 0 || yy >= height)
+                    continue;
+                p = &scr[(yy >> 3) * wpitch + xx];
+                if (erase)
+                    *p &= (uint8_t)~(1 << (yy & 7));
+                else
+                    *p |= (uint8_t)(1 << (yy & 7));
+            }
+        }
+    }
+}
+
 static void uf_blit(uint8_t *scr, int wpitch, int height, int x, int ytop,
                     const unsigned char *blob, int ncols)
 {
-    int c, off, r0, lastrow;
-    uint8_t *p0;
-
-    if (!blob || ncols <= 0)
-        return;
-    if (x < 0 || x + ncols > wpitch || ytop < 0 || ytop + 15 >= height)
-        return;
-
-    off = ytop & 7;
-    r0 = ytop >> 3;
-    lastrow = height >> 3;
-    p0 = scr + r0 * wpitch + x;
-
-    for (c = 0; c < ncols; c++)
-    {
-        int word = blob[2 * c] | (blob[2 * c + 1] << 8);
-        uint8_t b0 = (uint8_t)((word << off) & 0xFF);
-        uint8_t b1 = (uint8_t)((word >> (8 - off)) & 0xFF);
-
-        if (b0)
-            p0[c] |= b0;
-        if (b1 && r0 + 1 < lastrow)
-            p0[c + wpitch] |= b1;
-        if (off && r0 + 2 < lastrow)
-        {
-            uint8_t b2 = (uint8_t)((word >> (16 - off)) & 0xFF);
-            if (b2)
-                p0[c + 2 * wpitch] |= b2;
-        }
-    }
+    uf_blit_ex(scr, wpitch, height, x, ytop, blob, ncols, 100, 0);
 }
 
 int epd_glyph(uint8_t *scr, int wpitch, int height, int x, int ytop, uint32_t cp)
@@ -154,6 +232,65 @@ int epd_utext_width(const uint16_t *s)
         w += adv;
     }
     return w;
+}
+
+/* v15.0: enlarged and reversed text, both needed by the month calendar.
+ *
+ * epd_text_scale advances the pen by `adv * scale`, so a caller can still
+ * predict a run's width as epd_text_width(s) * scale - which is what the
+ * calendar's info column uses to keep its strings off the glass edge.
+ *
+ * epd_text_inv clears ink instead of setting it.  Today's cell is a filled
+ * block with the date punched out of it, which is exactly the reversed
+ * highlight the sketch asks for, and it needs no second glyph set. */
+int epd_text_scale(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                   const char *s, int ratio)
+{
+    if (ratio <= 0)
+        return x;
+    while (*s)
+    {
+        int cols, adv;
+        const unsigned char *blob =
+            uf_find((uint32_t)(unsigned char)*s++, &cols, &adv);
+
+        uf_blit_ex(scr, wpitch, height, x, ytop, blob, cols, ratio, 0);
+        x += adv * ratio / 100;
+    }
+    return x;
+}
+
+int epd_text_inv(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                 const char *s)
+{
+    while (*s)
+    {
+        int cols, adv;
+        const unsigned char *blob =
+            uf_find((uint32_t)(unsigned char)*s++, &cols, &adv);
+
+        uf_blit_ex(scr, wpitch, height, x, ytop, blob, cols, 100, 1);
+        x += adv;
+    }
+    return x;
+}
+
+/* The same enlargement for codepoint strings: today's date is "13日", so the
+ * calendar needs ASCII digits and a Han glyph at one scale, in one run. */
+int epd_utext_scale(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                    const uint16_t *s, int ratio)
+{
+    if (ratio <= 0)
+        return x;
+    while (*s)
+    {
+        int cols, adv;
+        const unsigned char *blob = uf_find(*s++, &cols, &adv);
+
+        uf_blit_ex(scr, wpitch, height, x, ytop, blob, cols, ratio, 0);
+        x += adv * ratio / 100;
+    }
+    return x;
 }
 
 void epd_rune(uint8_t *scr, int wpitch, int height, int x, int ytop)

@@ -220,10 +220,37 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_read_temp(void)
 #define EPD_WIN_GATES    (EPD_WIN_GATE_LAST - EPD_WIN_GATE_FIRST + 1)
 #define EPD_WIN_GD_SM_TB 0x01  // GD=0, SM=0, TB=1 - unchanged from the full path
 
-_attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size, uint8_t full_or_partial)
-{    
+/* ===========================================================================
+ * v15.0 - the refresh is split into three calls so the RED layer can be sent
+ * from the SAME 4000-byte framebuffer the black layer was built in.
+ *
+ * SSD1680 keeps black and red in two separate RAMs (0x24 / 0x26) and a BWR
+ * pixel is the pair (black_bit, red_bit), so the red layer needs a whole frame
+ * of its own - but this build has room for exactly one panel buffer.  The way
+ * out is ordering rather than another buffer: the black frame is inside the
+ * controller once its bytes are out, so the caller may rebuild that single
+ * buffer as the red frame and send it too.  Hence:
+ *
+ *     t = EPD_BWR_213_Begin(full);            // reset + registers + temp read
+ *     EPD_BWR_213_Load(black, size, 0x24);
+ *     EPD_BWR_213_Load(red,   size, 0x26);    // caller rebuilt the buffer
+ *     EPD_BWR_213_Activate(full);
+ *
+ * EPD_BWR_213_Display() below is exactly those three calls with an all-zero red
+ * frame, i.e. byte-for-byte the behaviour this driver had before the split.
+ * Upstream's "TODO make something out of it :)" on 0x26 is now a real entry
+ * point instead of a dead end.
+ * ===========================================================================
+ * v15.0 adds one parameter pair: the caller now says WHICH gates a partial
+ * refresh should drive.  The time page passes the minute-digit band
+ * (EPD_WIN_GATE_*), the calendar page the voltage band (CAL_WIN_GATE_*), and
+ * neither is written into this file any more.
+ * ===========================================================================
+ */
+_attribute_ram_code_ uint8_t EPD_BWR_213_Begin(uint8_t full_or_partial, uint16_t gate_first, uint16_t gates)
+{
     uint8_t epd_temperature = 0 ;
-    
+
     // SW Reset
     EPD_WriteCmd(0x12);
 
@@ -252,14 +279,14 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size,
         // v7.0 partial refresh: drive ONLY the gates that carry the clock digits
         // (see the block comment above this function).  Everything else is left
         // undriven and keeps its ink from the last full refresh.
-        EPD_WriteData((uint8_t)((EPD_WIN_GATES - 1) & 0xFF));            // MUX[7:0]
-        EPD_WriteData((uint8_t)(((EPD_WIN_GATES - 1) >> 8) & 0x01));     // MUX[8]
+        EPD_WriteData((uint8_t)((gates - 1) & 0xFF));            // MUX[7:0]
+        EPD_WriteData((uint8_t)(((gates - 1) >> 8) & 0x01));     // MUX[8]
         EPD_WriteData(EPD_WIN_GD_SM_TB);
 
         // Gate scan start position (0x0F): the first gate that gets driven.
         EPD_WriteCmd(0x0F);
-        EPD_WriteData((uint8_t)(EPD_WIN_GATE_FIRST & 0xFF));             // SCN[7:0]
-        EPD_WriteData((uint8_t)((EPD_WIN_GATE_FIRST >> 8) & 0x01));      // SCN[8]
+        EPD_WriteData((uint8_t)(gate_first & 0xFF));             // SCN[7:0]
+        EPD_WriteData((uint8_t)((gate_first >> 8) & 0x01));      // SCN[8]
     }
     else
 #endif
@@ -314,6 +341,12 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size,
 
     WaitMs(5);
 
+    return epd_temperature;
+}
+
+/* Load one full frame into the black (0x24) or red (0x26) RAM. */
+_attribute_ram_code_ void EPD_BWR_213_Load(unsigned char *image, int size, uint8_t ram_cmd)
+{
     // Set RAM X address
     EPD_WriteCmd(0x4E);
     EPD_WriteData(0x00);
@@ -323,23 +356,36 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size,
     EPD_WriteData(0x28);
     EPD_WriteData(0x01);
 
-    EPD_LoadImage(image, size, 0x24);
+    EPD_LoadImage(image, size, ram_cmd);
+}
 
-    // Set RAM X address
-    EPD_WriteCmd(0x4E);
-    EPD_WriteData(0x00);
-
-    // Set RAM Y address
-    EPD_WriteCmd(0x4F);
-    EPD_WriteData(0x28);
-    EPD_WriteData(0x01);
-
-    EPD_WriteCmd(0x26);// RED Color TODO make something out of it :)
+/* The red RAM with no red in it at all - what this driver always sent before
+ * v15.0, kept so the non-BWR callers stay byte-for-byte unchanged. */
+_attribute_ram_code_ void EPD_BWR_213_LoadZeros(int size, uint8_t ram_cmd)
+{
     int i;
+
+    // Set RAM X address
+    EPD_WriteCmd(0x4E);
+    EPD_WriteData(0x00);
+
+    // Set RAM Y address
+    EPD_WriteCmd(0x4F);
+    EPD_WriteData(0x28);
+    EPD_WriteData(0x01);
+
+    EPD_WriteCmd(ram_cmd);
     for (i = 0; i < size; i++)
     {
         EPD_WriteData(0x00);
     }
+}
+
+/* Drive the panel.  Kept separate from the loads so the two frames can be built
+ * one after the other in a single buffer - see the block comment above. */
+_attribute_ram_code_ void EPD_BWR_213_Activate(uint8_t full_or_partial)
+{
+    int i;
 
     if (!full_or_partial)
     {
@@ -356,8 +402,17 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size,
     
     // Master Activation
     EPD_WriteCmd(0x20);
+}
 
-    return epd_temperature;
+_attribute_ram_code_ uint8_t EPD_BWR_213_Display(unsigned char *image, int size, uint8_t full_or_partial)
+{
+    uint8_t t = EPD_BWR_213_Begin(full_or_partial, EPD_WIN_GATE_FIRST, EPD_WIN_GATES);
+
+    EPD_BWR_213_Load(image, size, 0x24);
+    EPD_BWR_213_LoadZeros(size, 0x26);
+    EPD_BWR_213_Activate(full_or_partial);
+
+    return t;
 }
 
 _attribute_ram_code_ void EPD_BWR_213_set_sleep(void)

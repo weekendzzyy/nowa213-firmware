@@ -53,3 +53,18 @@ void epd_rune(uint8_t *scr, int wpitch, int height, int x, int ytop);
  * slots have fixed x positions, so a '1' never moves its neighbours - which is
  * what lets the per-minute refresh drive only the last two slots. */
 void epd_clock(uint8_t *scr, int wpitch, int height, const char *hhmm);
+
+/* v15.0: scaled (nearest-neighbour) and reversed text, both for the month
+ * calendar.  The size argument is a PERCENTAGE: 100 = normal, 200 = double,
+ * 50 = half.  A percentage rather than a multiplier because Unifont's ASCII is
+ * 8 px wide and its Han 16 px, so making the digits as large as the characters
+ * means scaling the two halves of ONE string differently.
+ * epd_text_scale advances by `adv * ratio / 100`, so a run's width is still
+ * predictable.  epd_text_inv CLEARS ink, for punching the date out of the
+ * filled today box. */
+int epd_text_scale(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                   const char *s, int ratio);
+int epd_utext_scale(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                    const uint16_t *s, int ratio);
+int epd_text_inv(uint8_t *scr, int wpitch, int height, int x, int ytop,
+                 const char *s);

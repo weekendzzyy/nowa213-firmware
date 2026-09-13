@@ -269,12 +269,17 @@ static int put_lunar_day(uint16_t *dst, int n, int ld)
     return n;
 }
 
-int cal_row3(uint32_t t_local, uint16_t *dst, int maxn)
+/* ---- v15.0: the two halves, exposed separately --------------------------
+ * The month calendar's info column stacks the lunar date and the solar term on
+ * separate lines, so cal_row3 - which joins them with a space - is now built
+ * FROM these two instead of being the only entry point.  One implementation
+ * each, so the time page's row 3 and the calendar page cannot disagree.
+ * ------------------------------------------------------------------------ */
+static int lunar_text(uint32_t t_local, uint16_t *dst, int maxn)
 {
-    uint16_t tmp[CAL_ROW3_MAX];
-    int y, m, d, wd, lm, ld, leap, n = 0, term, ahead;
+    int y, m, d, wd, lm, ld, leap, n = 0;
 
-    if (maxn < CAL_ROW3_MAX)
+    if (maxn < 6) /* 闰 + 月名 + 月 + 日名(2) + NUL */
         return 0;
 
     cal_date(t_local, &y, &m, &d, &wd);
@@ -286,29 +291,76 @@ int cal_row3(uint32_t t_local, uint16_t *dst, int maxn)
         return 0;
 
     if (leap)
-        tmp[n++] = UF_C_LEAP;
-    tmp[n++] = UF_LUNAR_MONTH[lm];
-    tmp[n++] = UF_C_MONTH;
-    n = put_lunar_day(tmp, n, ld);
+        dst[n++] = UF_C_LEAP;
+    dst[n++] = UF_LUNAR_MONTH[lm];
+    dst[n++] = UF_C_MONTH;
+    n = put_lunar_day(dst, n, ld);
+    dst[n] = 0;
+    return n;
+}
 
-    if (next_term(y, m, d, &term, &ahead))
+static int term_text(uint32_t t_local, uint16_t *dst, int maxn)
+{
+    int y, m, d, wd, term, ahead, n = 0;
+
+    if (maxn < 7) /* 2 digits + 天后 + 节气名(2) + NUL */
+        return 0;
+
+    cal_date(t_local, &y, &m, &d, &wd);
+    if (!next_term(y, m, d, &term, &ahead))
+        return 0;
+
+    if (ahead == 0)
+    {
+        dst[n++] = UF_C_JIN;
+        dst[n++] = UF_C_DAY;
+    }
+    else
+    {
+        if (ahead >= 10)
+            dst[n++] = (uint16_t)('0' + ahead / 10);
+        dst[n++] = (uint16_t)('0' + ahead % 10);
+        dst[n++] = UF_C_TIAN;
+        dst[n++] = UF_C_HOU;
+    }
+    dst[n++] = UF_TERM[term][0];
+    dst[n++] = UF_TERM[term][1];
+    dst[n] = 0;
+    return n;
+}
+
+int cal_lunar_text(uint32_t t_local, uint16_t *dst, int maxn)
+{
+    return lunar_text(t_local, dst, maxn);
+}
+
+int cal_term_text(uint32_t t_local, uint16_t *dst, int maxn)
+{
+    return term_text(t_local, dst, maxn);
+}
+
+int cal_row3(uint32_t t_local, uint16_t *dst, int maxn)
+{
+    uint16_t tmp[CAL_ROW3_MAX];
+    uint16_t t2[CAL_TERM_MAX];
+    int n, m, tn, k;
+
+    if (maxn < CAL_ROW3_MAX)
+        return 0;
+
+    n = lunar_text(t_local, tmp, CAL_ROW3_MAX);
+    if (n <= 0)
+        return 0;
+
+    /* Worst case is 5 + 1 + 6 = 12 codepoints, well inside CAL_ROW3_MAX; the
+     * guard is here so a future longer term string degrades to "no term"
+     * instead of running off tmp[]. */
+    tn = term_text(t_local, t2, CAL_TERM_MAX);
+    if (tn > 0 && n + 1 + tn < CAL_ROW3_MAX)
     {
         tmp[n++] = ' ';
-        if (ahead == 0)
-        {
-            tmp[n++] = UF_C_JIN;
-            tmp[n++] = UF_C_DAY;
-        }
-        else
-        {
-            if (ahead >= 10)
-                tmp[n++] = (uint16_t)('0' + ahead / 10);
-            tmp[n++] = (uint16_t)('0' + ahead % 10);
-            tmp[n++] = UF_C_TIAN;
-            tmp[n++] = UF_C_HOU;
-        }
-        tmp[n++] = UF_TERM[term][0];
-        tmp[n++] = UF_TERM[term][1];
+        for (k = 0; k < tn; k++)
+            tmp[n++] = t2[k];
     }
 
     tmp[n] = 0;
@@ -317,4 +369,39 @@ int cal_row3(uint32_t t_local, uint16_t *dst, int maxn)
     for (m = 0; m <= n; m++)
         dst[m] = tmp[m];
     return n;
+}
+
+/* ===========================================================================
+ * v15.0 page 2 grid helpers.
+ *
+ * cal_date() reports tm_wday (0 = Sunday); a Monday-first grid wants 0 = Monday,
+ * so the +6 rotation is here, once, next to the arithmetic that produces the
+ * day number - the renderer never touches weekday numbering itself.
+ * ===========================================================================
+ */
+int cal_weekday(int y, int m, int d)
+{
+    long days = days_from_civil(y, m, d);
+    int wd = (int)(((days % 7) + 11) % 7); /* 0 = Sunday */
+
+    return (wd + 6) % 7; /* 0 = Monday */
+}
+
+int cal_days_in_month(int y, int m)
+{
+    static const unsigned char mdays[13] = {0, 31, 28, 31, 30, 31, 30,
+                                            31, 31, 30, 31, 30, 31};
+    int last;
+
+    if (m < 1 || m > 12)
+        return 0;
+    last = mdays[m];
+    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0))
+        last = 29;
+    return last;
+}
+
+int cal_year_supported(int year)
+{
+    return (year >= CAL_YEAR_FIRST && year <= CAL_YEAR_LAST) ? 1 : 0;
 }
