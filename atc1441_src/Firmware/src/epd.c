@@ -781,13 +781,15 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
     if (page == PAGE_CALENDAR)
     {
         int size = resolution_w * resolution_h / 8;
-        /* full, unless the caller asked for the 2-hour voltage band - see
-         * EPD_CAL_BWR_PARTIAL above for why that can be turned off. */
-        uint8_t cal_partial = (uint8_t)(full_or_partial ? 0
-                                     : (EPD_CAL_BWR_PARTIAL ? 1 : 0));
+        /* EPD_BWR_213_Begin/Activate take 0 = gate-windowed (partial),
+         * non-zero = full panel.  full_or_partial == 1 means a page switch or
+         * midnight full refresh; otherwise we are in the 2-hour voltage-band
+         * tick.  EPD_CAL_BWR_PARTIAL switches that tick to windowed. */
+        uint8_t cal_full = full_or_partial ? 1
+                           : (EPD_CAL_BWR_PARTIAL ? 0 : 1);
 
         /* Black frame first: once those bytes are out they live in the
-         * controller, so this single framebuffer can be rebuilt as the red
+         * controller, so this this single framebuffer can be rebuilt as the red
          * frame and sent too.  See the BWR block comment in epd_bwr_213.c. */
         epd_face_calendar(obd.ucScreen, resolution_w, resolution_h, time_is,
                           battery_mv, 0);
@@ -810,7 +812,7 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
              * for.  Both frames are still sent in full: only the driven gate
              * range shrinks, so a wrong window cannot tear the page, it can
              * only fail to update. */
-            t2 = EPD_BWR_213_Begin(cal_partial, CAL_WIN_GATE_FIRST,
+            t2 = EPD_BWR_213_Begin(cal_full, CAL_WIN_GATE_FIRST,
                                    CAL_WIN_GATES);
             EPD_BWR_213_Load(epd_buffer, size, 0x24);
 
@@ -820,7 +822,7 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
             FixBuffer(epd_temp, epd_buffer, resolution_w, resolution_h);
             EPD_BWR_213_Load(epd_buffer, size, 0x26);
 
-            EPD_BWR_213_Activate(cal_partial);
+            EPD_BWR_213_Activate(cal_full);
 
             epd_temperature = t2;
             epd_temperature_is_read = 1;

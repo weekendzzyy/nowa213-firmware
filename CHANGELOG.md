@@ -1355,6 +1355,47 @@ advance（笔位）右对齐的，但**笔位对齐不等于墨迹对齐**——
 **大小**：85596 字节
 **SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）
 
+## v15.3 — 2026-09-13（修复月历页切页不全屏刷新）
+
+**功能**：修复 v15.0 引入、v15.1/v15.2 延续的月历页切页 bug。从时间页切到月历页（NFC 空贴 / BLE opcode / NFC 命令）时，本应立即执行一次整屏全刷，实际却只刷新了右侧「电压带」那一小段栅极窗口，导致大时钟、行1、行3左侧等时间页内容残留在月历页上。
+
+**根因**（`atc1441_src/Firmware/src/epd.c`）：
+
+- `EPD_BWR_213_Begin/Activate` 的语义是：**参数 `0` = 套栅极窗口（局部），非 `0` = 全屏**（`epd_bwr_213.c:277` / `:390`）。
+- 月历页分支 `epd_display()` 里用了中间变量：
+  ```c
+  uint8_t cal_partial = full_or_partial ? 0
+                        : (EPD_CAL_BWR_PARTIAL ? 1 : 0);
+  ```
+  作者意图是 `0 = full`，但 `Begin/Activate` 却把它当 `0 = partial`，二者恰好相反。
+- 切页时 `page_full = 1` → `full_or_partial = 1` → `cal_partial = 0` → `Begin(0)` 套上了 `CAL_WIN` 电压带窗口，月历页其他栅极未被驱动。
+
+**修复**（`atc1441_src/Firmware/src/`）：
+
+- 把中间变量改成与 `Begin/Activate` 约定一致的 `cal_full`：
+  ```c
+  uint8_t cal_full = full_or_partial ? 1
+                     : (EPD_CAL_BWR_PARTIAL ? 0 : 1);
+  ```
+- `EPD_BWR_213_Begin(cal_full, ...)`、`EPD_BWR_213_Activate(cal_full)`。
+- 同时修正了 2 小时电压带刷新的方向：原来在 `EPD_CAL_BWR_PARTIAL=1` 时它反而做了全屏刷新，现在回归局部；`EPD_CAL_BWR_PARTIAL=0` 时仍全屏。
+
+**改动文件**：`epd.c`、`app_config.h`（版本号 `v15.3`）。
+
+**边界与已知风险**（真机验证项）：
+
+- 修复只影响 **BWR213（`epd_model == 2`）** 月历页路径；时间页和图片页路径一直正确，不受影响。
+- 烧录后建议实测：NFC 空贴 → 月历页，应看到完整月历网格，无时间页大时钟残留。
+
+**验证**：`tools/verify_v14_layout.py` 81 项 PASS（UI 未动，纯回归）；镜像 86680 B 不变；`_end_bss_ = 0x84efa1`（余 4191 B）。
+
+**发布文件**：`firmware_releases/atc1441_3page_v15.3_2026-09-13_86680B.bin`
+**SHA256**：`9974c659b074df489b7d86980bd86a1979c3294a1e5962b945c468ac1dd1c0c7`
+**大小**：86680 字节
+**SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）
+
+---
+
 ## v15.2 — 2026-09-13（NFC 命令通道：手机写帧即可校时 / 切页 / 强制刷新）
 
 **功能**：v15 分期的第三步、也是 NFC 部分终章。**手机贴一下、写一帧命令，无需开 BLE 即可
