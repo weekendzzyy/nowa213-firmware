@@ -167,9 +167,12 @@ _attribute_ram_code_ void user_init_normal(void)
     init_flash();
     init_nfc();
     app_page_restore(); // v15.0: come back on the page that was last selected
-    // v4.0 clock-only: the user-image alternation is disabled, so the flash
-    // image check is no longer needed at boot (see main_loop comment).
-    // user_image_check_flash();
+    // v15.8: re-enabled for the three-page firmware.  The uploaded image lives
+    // in flash (0x79000) but has_user_image is RAM-only, so without this call
+    // a battery pull (or any cold boot) lands on an EMPTY image page - the
+    // magic check is what rediscovers the saved image.  Alternation itself
+    // (display_toggle) stays disabled; this only feeds the PAGE_IMAGE branch.
+    user_image_check_flash();
 
     // epd_display_tiff((uint8_t *)bart_tif, sizeof(bart_tif));
     // epd_display(3334533);
