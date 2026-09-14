@@ -349,14 +349,16 @@
 #define CAL_TODAY_SUFFIX_LIFT    5
 
 /* Everything in the info column except the enlarged today date is drawn at
- * one pair of sizes: ASCII digits at 6 px and Han glyphs at 8 px.  Unifont
- * gives ASCII an 8 px advance and Han 16 px, so the ratios are 75% and 50%.
+ * one pair of sizes: ASCII digits at 8 px and Han glyphs at 16 px - i.e. the
+ * full Unifont cell.  Unifont gives ASCII an 8 px advance and Han 16 px, so
+ * both ratios are 100%.
  *
- * 50% Han is the readable floor for this panel: a 16x16 glyph down to 8x8
- * still holds its strokes at the BWR 213's dot pitch, and it is what the user
- * asked for after seeing the previous 7 px / 12 px mix look unbalanced. */
-#define CAL_INFO_DIGIT_RATIO     75
-#define CAL_INFO_HAN_RATIO       50
+ * 100% is the hard ceiling without widening the column or touching the grid:
+ * the longest run ("2026年12月" / "10天后秋分" / "闰二月初二") is 80 px and the
+ * column is 85 px, leaving 5 px of slack.  Verified in previews/sim_cal_d100h100.
+ * The user signed off on this after seeing the 6 px / 8 px mix look too small. */
+#define CAL_INFO_DIGIT_RATIO     100
+#define CAL_INFO_HAN_RATIO       100
 
 /* Trimming the today box by this many px per side keeps the reversed block off
  * its neighbours' ink. */
