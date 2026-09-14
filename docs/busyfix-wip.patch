@@ -1,0 +1,29 @@
+diff --git a/atc1441_src/Firmware/src/epd.c b/atc1441_src/Firmware/src/epd.c
+index 6589cb4..ef2e174 100644
+--- a/atc1441_src/Firmware/src/epd.c
++++ b/atc1441_src/Firmware/src/epd.c
+@@ -306,16 +306,14 @@ _attribute_ram_code_ uint8_t epd_state_handler(void)
+         // Nothing todo
+         break;
+     case 1: // check if refresh is done and sleep epd if so
+-        if (epd_model == 1)
+-        {
+-            if (!EPD_IS_BUSY())
+-                epd_set_sleep();
+-        }
+-        else
+-        {
+-            if (EPD_IS_BUSY())
+-                epd_set_sleep();
+-        }
++        // NOTE: EPD_IS_BUSY() is true while the panel is updating (active-low
++        // BUSY pin - see epd_spi.c busy-wait loops).  Both controllers share the
++        // same BUSY polarity, so the panel must be put to sleep when it is IDLE,
++        // i.e. when !EPD_IS_BUSY().  The model-2 branch below used to test
++        // EPD_IS_BUSY() (sleep-while-busy), which cut every refresh short by
++        // powering off VCI mid-update and cleared epd_update_state too early.
++        if (!EPD_IS_BUSY())
++            epd_set_sleep();
+         break;
+     }
+     return epd_update_state;

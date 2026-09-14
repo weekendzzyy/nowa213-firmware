@@ -66,3 +66,10 @@ fcc_internal.pdf
 # ---- Python virtualenvs ----
 .venv/
 venv/
+
+# ---- Scratch: one-off session outputs (safe to empty at any time) ----
+# AI/dev sessions must drop temporary logs, commit-msg drafts, git command
+# output captures, etc. here instead of littering the repo root.
+# See PROJECT_STRUCTURE.md rule R6.
+scratch/
+

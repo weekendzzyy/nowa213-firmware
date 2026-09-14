@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nowa-213R-N 工具箱（刷固件 / 传图 / 校时 / 切页）</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 16px; max-width: 900px; }
+  button { padding: 8px 14px; margin: 4px 4px 4px 0; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  section { border: 1px solid #ccc; border-radius: 8px; padding: 4px 16px 12px; margin: 14px 0; }
+  section h3 { margin: 12px 0 6px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  #log { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; margin-top: 8px;
+         max-height: 260px; overflow: auto; background: #f4f4f4; padding: 8px; border: 1px solid #ddd; }
+  .hint { color: #555; font-size: 13px; }
+  .warn { color: #b00; font-size: 13px; font-weight: 600; }
+  #status { margin: 8px 0; font-weight: 600; }
+  progress { width: 100%; height: 14px; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+  #preview { border: 1px solid #888; image-rendering: pixelated; width: 500px; height: 244px; background:#fff; }
+  .ctlrow { margin: 6px 0; }
+  .ctlrow label { margin-right: 14px; }
+  #connBar { background: #eef4ff; border: 1px solid #b8ccf0; border-radius: 8px; padding: 8px 14px; }
+  #connState { font-weight: 600; margin-left: 8px; }
+</style>
+</head>
+<body>
+<h2>Nowa-213R-N 工具箱</h2>
+<p class="hint">用法：在本目录运行 <code>python -m http.server 8000</code>，浏览器打开
+<a href="http://localhost:8000/web_tool.html">http://localhost:8000/web_tool.html</a>。
+WebBLE 需要 localhost 或 https 安全环境，不能直接双击 file:// 打开。
+一次连接即可使用全部功能（刷固件、传图、校时、切页共用同一条 BLE 链路）。</p>
+
+<div id="connBar">
+  <button id="connectBtn">连接</button>
+  <button id="reconnectBtn" disabled>重连</button>
+  <span id="connState">未连接</span>
+</div>
+
+<div id="status">就绪</div>
+
+<!-- ================= 固件刷写 ================= -->
+<section>
+<h3>① 固件刷写（BLE OTA）</h3>
+<p class="hint">选择要刷入的固件 <code>.bin</code>（必须是 Telink 固件，头部含 <code>TLNK</code> 标识）：</p>
+<input type="file" id="fwInput" accept=".bin">
+<br>
+<label class="hint"><input type="checkbox" id="verifyChk" checked>
+  回读校验（推荐；刷完逐字节读回比对，全部一致才提交重启。约多花 1 分钟）</label>
+<br>
+<label class="hint"><input type="checkbox" id="autoTimeChk" checked>
+  刷完自动校时（提交后设备重启，自动重连并把时间写回，失败时可手动点下方「同步时间」）</label>
+<br>
+<button id="flashBtn" disabled>开始刷写</button>
+<progress id="prog" value="0" max="100"></progress>
+<p class="warn">刷写过程中不要断开连接、不要关页面。设备只在你完成上传并「提交」之后才会真正切换固件；
+上传中断的话直接重来即可，设备仍跑旧固件，不会变砖。</p>
+<p class="hint">刷完固件后点「连接」报 <code>NetworkError</code> 多半不是固件坏了：设备刚重启，等几秒再连，
+或按 F5 刷新本页清掉旧的 GATT 句柄（v15.7 起广播间隔已恢复 1 秒，不用再等 10 秒）。</p>
+</section>
+
+<!-- ================= 图片上传 ================= -->
+<section>
+<h3>② 图片上传</h3>
+<input type="file" id="imgInput" accept="image/*">
+<button id="loadBtn">载入图片</button>
+<br>
+<canvas id="preview" width="250" height="122"></canvas>
+<p class="hint">预览 = 屏幕上最终显示的样子（已含固件列翻转）。下方黑色块 = 该区域为黑。</p>
+<div class="ctlrow">
+  <label class="hint">黑白阈值 <input type="range" id="threshSlider" min="1" max="254" value="128" style="vertical-align:middle"> <span id="threshVal">128</span></label>
+  <label class="hint"><input type="checkbox" id="invertChk"> 反色</label>
+</div>
+<p class="hint">阈值往右拖 → 更多区域变黑；往左拖 → 更多区域变白。浅色图片建议适当调高阈值。</p>
+<button id="uploadBtn">上传图片 (BLE)</button>
+<p class="hint">上传完成后图片会立即显示一次并保存；要常驻显示请用下方「切到图片页」。</p>
+</section>
+
+<!-- ================= 校时 / 切页 ================= -->
+<section>
+<h3>③ 校时与切页</h3>
+<button id="timeBtn">同步时间</button>
+<span class="hint">刷完固件后设备时间归零，必须校时一次。时区固定按 UTC+8 发送。</span>
+<br><br>
+<button class="pageBtn" data-page="1">切到时间页</button>
+<button class="pageBtn" data-page="2">切到月历页</button>
+<button class="pageBtn" data-page="3">切到图片页</button>
+<button id="nextPageBtn">下一页</button>
+</section>
+
+<div id="log"></div>
+
+<script>
+// ---- GATT UUIDs (verified against firmware src/app_att.c / epd_ble_service.c) ----
+// OTA  : my_OtaServiceUUID = 0x221f / my_OtaUUID = 0x331f
+// EPD  : epd display service (image upload + page switch, epd_ble_service.c)
+// RxTx : my_RxTx_ServiceUUID = 0x1f10 / my_RxTxUUID = 0x1f1f  (time sync 0xDD)
+const OTA_SERVICE  = '0000221f-0000-1000-8000-00805f9b34fb';
+const OTA_CHAR     = '0000331f-0000-1000-8000-00805f9b34fb';
+const EPD_SERVICE  = '13187b10-eba9-a3ba-044e-83d3217d9a38';
+const EPD_CHAR     = '4b646063-6264-f3a7-8941-e65356ea82fe';
+const RXTX_SERVICE = '00001f10-0000-1000-8000-00805f9b34fb';
+const RXTX_CHAR    = '00001f1f-0000-1000-8000-00805f9b34fb';
+
+// ---- firmware / OTA geometry (see Firmware/src/ota.c) ------------------------
+const BANK_START = 0x20000;   // OTA_BANK_START
+const BANK_SIZE  = 0x20000;   // OTA_MAX_SIZE (128 KB)
+const SECTOR     = 0x1000;    // flash erase granularity
+const BANK_WRITE = 0x100;     // device buffer is 256 bytes
+const MAX_PAYLOAD = 240;      // max bytes per ATT write (MTU 247 -> 244 incl. opcode)
+
+// ---- panel geometry ----
+const W = 250, H_VISIBLE = 122, H_STORAGE = 128;
+const FB = W * (H_STORAGE / 8);  // 4000 bytes
+
+const TZ_OFFSET_SECONDS = 8 * 3600;   // tag displays UTC+8 (firmware applies no offset)
+
+// ---- state ----
+let device = null, server = null;
+let otaChar = null, epdChar = null, rxtxChar = null;
+let firmware = null;                  // Uint8Array of the selected .bin
+let currentImg = null;                // loaded Image for re-conversion on threshold/invert change
+let currentBuf = null;                // 4000-byte framebuffer ready to send
+let pendingNotify = null;             // { resolve, timer } for the next OTA notification
+let busy = false;                     // an OTA run is in progress
+
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function log(s){ const el = $('log'); el.textContent += s + '\n'; el.scrollTop = el.scrollHeight; }
+function setStatus(s){ $('status').textContent = s; }
+function setConn(s){ $('connState').textContent = s; }
+function setProg(p){ $('prog').value = Math.max(0, Math.min(100, p)); }
+function b4(v){ return [(v>>>24)&0xff, (v>>>16)&0xff, (v>>>8)&0xff, v&0xff]; }
+function hex(a){ return Array.from(a, b => ('0'+b.toString(16)).slice(-2)).join(' ').toUpperCase(); }
+function hexToBytes(h){
+  const b = [];
+  for (let c = 0; c < h.length; c += 2) b.push(parseInt(h.substr(c,2),16));
+  return new Uint8Array(b);
+}
+
+// ===========================================================================
+// Connection (shared by all sections)
+// ===========================================================================
+// The tag re-advertises every 1 s since v15.7, so connect attempts rarely miss
+// an advertisement — but keep the retry with backoff as a safety net.
+async function connectWithRetry(dev, attempts){
+  attempts = attempts || 5;
+  for (let i = 1; i <= attempts; i++){
+    try{
+      return await dev.gatt.connect();
+    }catch(e){
+      log('连接尝试 ' + i + '/' + attempts + ' 失败: ' + e);
+      if (i === attempts) throw e;
+      setConn('重试连接 ' + (i + 1) + '/' + attempts + '…');
+      await sleep(1200 * i);
+    }
+  }
+}
+
+function onDisconnected(){
+  setConn('已断开');
+  log('连接已断开（刚提交完固件时属正常：设备正在重启）');
+  otaChar = null; epdChar = null; rxtxChar = null;
+  $('flashBtn').disabled = true;
+  $('timeBtn').disabled = true;
+  $('uploadBtn').disabled = true;
+  document.querySelectorAll('.pageBtn').forEach(b => b.disabled = true);
+  $('nextPageBtn').disabled = true;
+  $('reconnectBtn').disabled = false;
+}
+
+async function setupServices(){
+  otaChar = null; epdChar = null; rxtxChar = null;
+
+  const svc = await server.getPrimaryService(OTA_SERVICE);
+  otaChar = await svc.getCharacteristic(OTA_CHAR);
+  await otaChar.startNotifications();
+  otaChar.addEventListener('characteristicvaluechanged', ev => {
+    const dv = ev.target.value;
+    const arr = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
+    if (pendingNotify){
+      clearTimeout(pendingNotify.timer);
+      const r = pendingNotify.resolve;
+      pendingNotify = null;
+      r(arr);
+    } else {
+      log('（忽略一条意外通知: ' + hex(arr) + '）');
+    }
+  });
+  log('OTA 特征已就绪（刷固件）');
+
+  try{
+    const svc2 = await server.getPrimaryService(EPD_SERVICE);
+    epdChar = await svc2.getCharacteristic(EPD_CHAR);
+    log('EPD 特征已就绪（传图/切页）');
+  }catch(e){ epdChar = null; log('警告：未找到 EPD 特征，传图/切页不可用。' + e); }
+
+  try{
+    const svc3 = await server.getPrimaryService(RXTX_SERVICE);
+    rxtxChar = await svc3.getCharacteristic(RXTX_CHAR);
+    log('RxTx 特征已就绪（校时）');
+  }catch(e){ rxtxChar = null; log('警告：未找到 RxTx 特征，校时不可用。' + e); }
+
+  $('flashBtn').disabled = false;
+  $('timeBtn').disabled = !rxtxChar;
+  $('uploadBtn').disabled = !epdChar;
+  document.querySelectorAll('.pageBtn').forEach(b => b.disabled = !epdChar);
+  $('nextPageBtn').disabled = !epdChar;
+  $('reconnectBtn').disabled = false;
+}
+
+async function connect(){
+  try{
+    // Drop any link left over from a previous session FIRST. After an OTA the tag
+    // reboots, but the page - and Windows' BLE stack - can still hold the old
+    // link-layer handle; connecting on top of a stale handle fails immediately.
+    if (device && device.gatt && device.gatt.connected){
+      try{ device.gatt.disconnect(); }catch(_){}
+      await sleep(400);
+    }
+    // One requestDevice call authorizes ALL three services — this is what makes
+    // a single connection serve flashing + image upload + time sync + paging.
+    device = await navigator.bluetooth.requestDevice({
+      optionalServices: [OTA_SERVICE, EPD_SERVICE, RXTX_SERVICE],
+      acceptAllDevices: true
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    setConn('连接中…');
+    server = await connectWithRetry(device, 5);
+    setConn('已连接: ' + (device.name || '???'));
+    await setupServices();
+  }catch(e){
+    setConn('连接失败');
+    log('连接错误: ' + e);
+    log('排查顺序：①设备刚重启，等几秒再点「连接」；' +
+        '②按 F5 刷新本页，清掉旧的 GATT 句柄；' +
+        '③确认价签屏幕是否在走字（不走字说明固件没起来，见 README 救砖）。');
+  }
+}
+
+// Reconnect to the SAME device (no new chooser dialog).
+async function reconnect(quiet){
+  if (!device){ setConn('请先点「连接」选择设备'); return false; }
+  try{
+    if (device.gatt.connected) return true;
+    setConn('重连中…');
+    server = await connectWithRetry(device, 5);
+    setConn('已重连: ' + (device.name || '???'));
+    await setupServices();
+    return true;
+  }catch(e){
+    if (!quiet){ setConn('重连失败'); log('重连错误: ' + e); }
+    return false;
+  }
+}
+
+// ===========================================================================
+// Section ①: firmware OTA (mirror of atc1441 ATC_TLSR_Paper_OTA_writing.html)
+// ===========================================================================
+// Notification plumbing: the device replies to cmd 0x01 and 0x04/0x05 with a
+// BLE notification on the same characteristic. Register the resolver BEFORE the
+// write so the reply can never be missed.
+function nextNotify(timeoutMs){
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingNotify && pendingNotify.timer === timer) pendingNotify = null;
+      reject(new Error('等待设备通知超时（' + (timeoutMs||2000) + 'ms）'));
+    }, timeoutMs || 2000);
+    pendingNotify = { resolve, timer };
+  });
+}
+
+async function writeOta(bytes){
+  await otaChar.writeValue(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+}
+
+$('fwInput').addEventListener('change', function(){
+  const f = this.files[0];
+  if (!f){ firmware = null; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const bytes = new Uint8Array(reader.result);
+    // The tag only ever boots a Telink image; check the 'TLNK' magic at offset 8.
+    const magic = bytes.length > 11 ? Array.from(bytes.slice(8,12)).join(',') : '';
+    if (magic !== '75,78,76,84'){
+      log('拒绝：这不是 Telink 固件 .bin（offset 8 处没有 TLNK 标识）');
+      setStatus('文件无效');
+      firmware = null;
+      return;
+    }
+    if (bytes.length > BANK_SIZE){
+      log('拒绝：文件 ' + bytes.length + ' 字节超过 OTA bank 上限 ' + BANK_SIZE + ' 字节');
+      setStatus('文件过大');
+      firmware = null;
+      return;
+    }
+    firmware = bytes;
+    log('已载入固件: ' + bytes.length + ' 字节；首 16 字节 ' + hex(bytes.slice(0,16)));
+    setStatus('固件已载入，可以开始刷写');
+  };
+  reader.readAsArrayBuffer(f);
+});
+
+// cmd 0x01: erase one 4 KB sector in the OTA bank. Device always replies with a
+// notification echoing the command -> consume it to keep the reply stream in sync.
+async function eraseFwArea(){
+  let n = 0;
+  const total = BANK_SIZE / SECTOR;
+  for (let addr = BANK_START; addr < BANK_START + BANK_SIZE; addr += SECTOR){
+    const p = nextNotify(4000);
+    await writeOta([0x01, ...b4(addr)]);
+    await p;
+    n++;
+    setStatus('擦除 OTA 区 ' + n + '/' + total + ' (' + addr.toString(16) + ')');
+    setProg(n / total * 10);
+  }
+  log('OTA 区已擦除（' + total + ' 个扇区）');
+}
+
+// cmd 0x04: read 20 bytes of flash back. Device replies with a 20-byte notification.
+async function readFlash(addr){
+  const p = nextNotify(2500);
+  await writeOta([0x04, ...b4(addr)]);
+  return await p;
+}
+
+// Upload the whole image in 256-byte banks; each bank is sent as <=240-byte
+// cmd 0x03 chunks followed by a cmd 0x02 "commit this bank" to `addr`.
+async function uploadImage(bytes){
+  const totalBanks = Math.ceil(bytes.length / BANK_WRITE);
+  let bank = 0;
+  for (let off = 0; off < bytes.length; off += BANK_WRITE){
+    let chunk = bytes.slice(off, off + BANK_WRITE);
+    // flash_write_page() works in 4-byte units; pad the tail with 0xFF (a no-op
+    // on already-erased flash) so the final short bank stays aligned.
+    if (chunk.length % 4 !== 0){
+      const pad = new Uint8Array(chunk.length + (4 - chunk.length % 4)).fill(0xFF);
+      pad.set(chunk);
+      chunk = pad;
+    }
+    for (let p = 0; p < chunk.length; p += MAX_PAYLOAD){
+      await writeOta([0x03, ...chunk.slice(p, p + MAX_PAYLOAD)]);
+    }
+    await writeOta([0x02, ...b4(BANK_START + off)]);
+    bank++;
+    if (bank % 8 === 0 || bank === totalBanks){
+      setStatus('上传 ' + Math.min(off + BANK_WRITE, bytes.length) + '/' + bytes.length +
+                ' 字节（第 ' + bank + '/' + totalBanks + ' 块）');
+      setProg(10 + bank / totalBanks * 55);
+    }
+  }
+  log('镜像已上传到 OTA bank（' + bytes.length + ' 字节）');
+}
+
+// Read the whole uploaded region back and compare byte-for-byte.
+async function verifyImage(bytes){
+  log('开始回读校验…');
+  let checked = 0;
+  for (let off = 0; off < bytes.length; off += 20){
+    const got = await readFlash(BANK_START + off);
+    const n = Math.min(20, bytes.length - off);
+    for (let i = 0; i < n; i++){
+      if (got[i] !== bytes[off + i]){
+        throw new Error('校验失败 @ 0x' + (BANK_START + off + i).toString(16) +
+                        '：设备=' + got[i] + '，主机=' + bytes[off + i]);
+      }
+    }
+    checked += n;
+    if ((off / 20) % 200 === 0){
+      setStatus('回读校验 ' + checked + '/' + bytes.length + ' 字节');
+      setProg(65 + checked / bytes.length * 30);
+    }
+  }
+  log('回读校验通过：' + bytes.length + ' 字节完全一致');
+}
+
+// The device-side gate in ota.c case 7 compares its RAM out_buffer[5..6] and
+// crc_out against each other — both are 0 after the last cmd 0x02 (which memsets
+// the buffer). cmd 0x05 @0 copies 20 zero bytes into out_buffer, so the gate
+// passes deterministically no matter what the device did earlier in the session.
+async function primeFinalGate(){
+  const p = nextNotify(2500);
+  await writeOta([0x05, 0x00, 0x00, 0x00, 0x00]);
+  const v = await p;
+  if (!v.every(b => b === 0)){
+    log('提示：设备 out_buffer 不是全 0（' + hex(v) + '），仍发送 magic 提交');
+  }
+}
+
+// Same sum the official tool computes: over 0x20000 bytes, 0xFF-padded, & 0xffff.
+function calcCrc(bytes){
+  let sum = 0;
+  for (let i = 0; i < BANK_SIZE; i++) sum += (i < bytes.length ? bytes[i] : 0xFF);
+  return sum & 0xffff;
+}
+
+async function commitFirmware(){
+  const crc = calcCrc(firmware);
+  const magic = [0x07, 0xC0, 0x01, 0xCE, 0xED, (crc>>>8)&0xff, crc&0xff];
+  log('提交 magic：07 C0 01 CE ED ' + (((crc>>>8)&0xff).toString(16)) + ' ' + ((crc&0xff).toString(16)) +
+      '  （设备会忽略该 CRC，真正的保障是上面的回读校验）');
+  try{
+    await writeOta(magic);
+  }catch(e){
+    // A commit makes the device erase 0x00000-0x1FFFF and reboot, so the ATT
+    // response may never come back. If the link dropped, the device is rebooting
+    // on the new firmware; if it is still here, the write really did not land.
+    const gone = !(device && device.gatt && device.gatt.connected);
+    if (gone){
+      log('提交写入未收到应答，但设备已断开 —— 这是设备在重启，提交应已生效。请看屏幕确认。');
+      return;
+    }
+    log('提交写入失败且设备仍在线，重试一次…');
+    await sleep(800);
+    await writeOta(magic);
+  }
+  log('提交命令已发送。设备正在擦写 0x00000–0x1FFFF 并重启，连接会断开，这是正常的。');
+}
+
+// After commit the tag reboots (time reset to 0). Wait for it to come back,
+// reconnect to the SAME device and write the clock again. Best effort only.
+async function autoTimeSyncAfterReboot(){
+  setStatus('设备重启中，自动重连校时…');
+  log('等待设备重启后自动校时…');
+  await sleep(4000);
+  for (let i = 1; i <= 8; i++){
+    if (await reconnect(true)){
+      try{
+        const when = await syncTime();
+        setStatus('刷写 + 自动校时完成');
+        log('自动校时成功，时间已设置为: ' + when);
+        return;
+      }catch(e){
+        log('自动校时写入失败: ' + e);
+      }
+    }
+    setConn('自动重连 ' + i + '/8…');
+    await sleep(3000);
+  }
+  setStatus('刷写完成；自动校时未成功，请手动「重连」后点「同步时间」');
+  log('自动校时失败——设备重启可能比预期慢。等几秒后手动重连并点「同步时间」即可。');
+}
+
+async function flashFirmware(){
+  if (!otaChar) return setStatus('请先连接设备');
+  if (!firmware) return setStatus('请先选择 .bin 固件');
+  if (busy) return;
+  busy = true;
+  $('flashBtn').disabled = true;
+  let stage = '开始';
+  try{
+    log('=== 开始刷写：' + firmware.length + ' 字节 ===');
+    setProg(0);
+    stage = '擦除 OTA 区';
+    await eraseFwArea();
+    stage = '上传镜像';
+    await uploadImage(firmware);
+    stage = '回读校验';
+    if ($('verifyChk').checked){
+      await verifyImage(firmware);
+    } else {
+      log('已跳过回读校验（风险自负）');
+      setProg(95);
+    }
+    stage = '提交';
+    await primeFinalGate();
+    await commitFirmware();
+    setProg(100);
+    if ($('autoTimeChk').checked){
+      await autoTimeSyncAfterReboot();
+    } else {
+      setStatus('完成：设备正在切换固件并重启（重启后先校时，时间已归零）');
+    }
+  }catch(e){
+    if (stage === '提交'){
+      setStatus('提交阶段出错 —— 设备可能已在重启，请看屏幕确认');
+      log('错误（提交阶段）: ' + e);
+      log('提交是最后一步：屏幕已是新版式就是成功了；若仍是旧界面（DSEG 时钟 + Battery 行），' +
+          '重连再刷一次即可，设备未被改动。');
+    } else {
+      setStatus('中止于「' + stage + '」，未提交，设备仍运行旧固件');
+      log('错误（' + stage + ' 阶段）: ' + e);
+      log('设备未被改动（只有在最后一步「提交」之后才会切换固件）。可修正后重试。');
+    }
+  }finally{
+    busy = false;
+    $('flashBtn').disabled = !(device && device.gatt && device.gatt.connected && otaChar);
+  }
+}
+
+// ===========================================================================
+// Section ②: image upload
+// ===========================================================================
+// Convert a loaded <img> to the 250x122-framebuffer byte layout the firmware expects.
+// Layout (matches epd.c / epd_image_tool.py): byte = col*16 + (row>>3); MSB(top). 0x00=BLACK, 0xFF=WHITE.
+// The firmware's 0x01 handler flips columns, so this natural layout shows correctly on glass.
+function imageToFramebuffer(img, threshold, invert){
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H_STORAGE;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H_STORAGE);  // off-panel rows stay white
+  // contain-fit the image into the visible 250x122 area
+  const scale = Math.min(W / img.width, H_VISIBLE / img.height);
+  const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+  const dx = Math.round((W - dw) / 2), dy = Math.round((H_VISIBLE - dh) / 2);
+  ctx.drawImage(img, dx, dy, dw, dh);
+
+  const data = ctx.getImageData(0, 0, W, H_STORAGE).data;
+  const buf = new Uint8Array(FB).fill(0xFF);  // all white
+  for (let y = 0; y < H_VISIBLE; y++){
+    for (let x = 0; x < W; x++){
+      const i = (y * W + x) * 4;
+      let lum = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+      if (invert) lum = 255 - lum;
+      if (lum < threshold){  // black -> clear bit
+        buf[x * 16 + (y >> 3)] &= ~(0x80 >> (y & 7));
+      }
+    }
+  }
+  return buf;
+}
+
+// Render the FINAL on-screen appearance for preview verification.
+// The firmware flips columns once and the BW213 panel scans right-to-left, so
+// the two cancels and the glass shows buf AS-IS (natural). No extra flip here.
+function drawPreview(buf){
+  const cv = $('preview');
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H_VISIBLE);
+  for (let y = 0; y < H_VISIBLE; y++){
+    for (let x = 0; x < W; x++){
+      const byte = buf[x * 16 + (y >> 3)];
+      const bit = (byte >> (7 - (y & 7))) & 1;
+      const v = bit ? 255 : 0;
+      const i = (y * W + x) * 4;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v; img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function reconvert(){
+  if (!currentImg) return;
+  currentBuf = imageToFramebuffer(currentImg, +$('threshSlider').value, $('invertChk').checked);
+  drawPreview(currentBuf);
+}
+
+$('loadBtn').onclick = () => {
+  const f = $('imgInput').files[0];
+  if (!f) return setStatus('请先选择图片文件');
+  const img = new Image();
+  img.onload = () => {
+    currentImg = img;
+    reconvert();
+    log('图片已载入并打包（4000 字节）');
+  };
+  img.onerror = () => setStatus('图片载入失败');
+  img.src = URL.createObjectURL(f);
+};
+$('threshSlider').oninput = () => {
+  $('threshVal').textContent = $('threshSlider').value;
+  reconvert();  // live preview while dragging
+};
+$('invertChk').onchange = reconvert;
+
+async function sendImage(buf){
+  if (!epdChar) throw new Error('未连接 EPD_BLE');
+  const h = Array.from(buf, b => ('0'+b.toString(16)).slice(-2)).join('');
+  await epdChar.writeValue(hexToBytes('0000'));   // clear buffer to black
+  await epdChar.writeValue(hexToBytes('020000')); // set byte_pos = 0
+  for (let off = 0; off < h.length; off += 480){
+    const chunk = h.substr(off, 480);             // 240 bytes per write
+    await epdChar.writeValue(hexToBytes('03' + chunk));
+  }
+  await epdChar.writeValue(hexToBytes('01'));      // display + save to flash
+}
+
+$('uploadBtn').onclick = async () => {
+  if (!epdChar) return setStatus('请先连接设备');
+  if (!currentBuf) return setStatus('请先载入图片');
+  try{
+    setStatus('上传中...');
+    await sendImage(currentBuf);
+    setStatus('上传完成');
+    log('图片已发送（已立即显示一次并保存到 flash）');
+  }catch(e){ setStatus('上传失败'); log('上传错误: '+e); }
+};
+
+// ===========================================================================
+// Section ③: time sync (RxTx 0xDD) + page switch (EPD 0x05/0x06)
+// ===========================================================================
+async function syncTime(){
+  if (!rxtxChar) throw new Error('未连接 RxTx 特征');
+  const t = Math.floor(Date.now()/1000) + TZ_OFFSET_SECONDS;
+  await rxtxChar.writeValue(new Uint8Array([0xDD,
+    (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]));
+  // t is already shifted into the tag's local time; render with getUTC* so the
+  // browser timezone is not applied a second time.
+  const d = new Date(t * 1000);
+  const p2 = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())} ` +
+         `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())} (UTC+8)`;
+}
+
+$('timeBtn').onclick = async () => {
+  try{ setStatus('校时中…'); const when = await syncTime(); setStatus('校时完成');
+       log('时间已设置为(价签将显示): ' + when);
+       log('屏幕将在下一分钟的整分刷新时显示新时间'); }
+  catch(e){ setStatus('校时失败'); log('校时错误: '+e); }
+};
+
+async function setPage(n){
+  if (!epdChar) return setStatus('请先连接设备');
+  try{
+    await epdChar.writeValue(new Uint8Array([0x05, n]));
+    setStatus('已发送切页命令: ' + ({1:'时间页',2:'月历页',3:'图片页'}[n] || n));
+    log('切页命令 0x05 页号 ' + n + ' 已发送（设备主循环下一圈执行全屏刷新）');
+  }catch(e){ setStatus('切页失败'); log('切页错误: '+e); }
+}
+
+document.querySelectorAll('.pageBtn').forEach(b => {
+  b.onclick = () => setPage(+b.dataset.page);
+});
+$('nextPageBtn').onclick = async () => {
+  if (!epdChar) return setStatus('请先连接设备');
+  try{
+    await epdChar.writeValue(new Uint8Array([0x06]));
+    setStatus('已发送「下一页」命令');
+    log('切页命令 0x06 已发送');
+  }catch(e){ setStatus('切页失败'); log('切页错误: '+e); }
+};
+
+// ===========================================================================
+// Wire up shared controls
+// ===========================================================================
+$('connectBtn').onclick = connect;
+$('reconnectBtn').onclick = () => reconnect(false);
+$('flashBtn').onclick = flashFirmware;
+</script>
+</body>
+</html>
