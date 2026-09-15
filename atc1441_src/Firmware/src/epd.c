@@ -119,13 +119,73 @@ void user_image_flip_horizontal(void)
 	}
 }
 
-// Persist the current epd_buffer to flash. Called after every BLE image upload
-// (opcode 0x01). Magic is written last so an interrupted erase/write is recoverable.
+/* v15.9 - the write that never worked.
+ *
+ * The frame is 4000 bytes, but flash page-program (SPI 0x02) CANNOT cross a
+ * 256-byte page boundary: the chip programs up to the end of the current page
+ * and then either wraps back to that page's start or drops the rest, depending
+ * on the part.  Until v15.8 this was one call - flash_write_page(addr, 4000, ...)
+ * - so only the first 252 bytes were ever programmable and everything the user
+ * uploaded beyond that was lost or written back over the sector's own head.
+ *
+ * That is exactly the reported symptom: an upload looks perfect immediately
+ * because the glass is driven from the RAM copy (epd_ble_service.c opcode 0x01),
+ * while anything that RELOADS the image from flash - the image page after an NFC
+ * page flip, or any cold boot - shows a blank panel with a few stray pixels.
+ * v15.8 restored user_image_check_flash() so the magic was finally honoured, but
+ * that only made a corrupt frame authoritative instead of an empty one.
+ *
+ * So: write in page-aligned chunks, and read the frame back before blessing it.
+ * The magic is the ONLY thing that declares "this frame is good", therefore it
+ * must not be written unless the bytes are demonstrably on the chip.  A failed
+ * verify leaves has_user_image = 0, which the image page renders as plain white
+ * - a wrong image is worse than an honest blank.
+ */
+#define USER_IMG_PAGE_SIZE 256
+
 void user_image_save(void)
 {
-	flash_erase_sector(USER_IMG_FLASH_ADDR);                              // 1) wipe the 4KB sector
-	flash_write_page(USER_IMG_FLASH_ADDR + 4, EPD_DISPLAY_SIZE, epd_buffer); // 2) write pixels
-	flash_write_page(USER_IMG_FLASH_ADDR, 4, (uint8_t *)&user_image_magic_word); // 3) mark valid
+	uint8_t *p = epd_buffer;
+	uint32_t addr = USER_IMG_FLASH_ADDR + 4;
+	uint32_t left = EPD_DISPLAY_SIZE;
+	uint8_t probe[32];
+	uint8_t ok = 1;
+	uint32_t i;
+
+	flash_erase_sector(USER_IMG_FLASH_ADDR); // 1) wipe the 4KB sector
+
+	while (left) // 2) write the pixels, never crossing a page boundary
+	{
+		uint32_t chunk = USER_IMG_PAGE_SIZE - (addr & (USER_IMG_PAGE_SIZE - 1));
+
+		if (chunk > left)
+			chunk = left;
+		flash_write_page(addr, chunk, p);
+		addr += chunk;
+		p += chunk;
+		left -= chunk;
+	}
+
+	/* 3) read it back.  Compared in 32-byte blocks because there is no spare
+	 * SRAM for a second 4000-byte frame (64KB total, stack top 0x850000). */
+	for (i = 0; i < EPD_DISPLAY_SIZE && ok; i += sizeof(probe))
+	{
+		uint32_t n = sizeof(probe);
+
+		if (n > EPD_DISPLAY_SIZE - i)
+			n = EPD_DISPLAY_SIZE - i;
+		flash_read_page(USER_IMG_FLASH_ADDR + 4 + i, n, probe);
+		if (memcmp(probe, &epd_buffer[i], n) != 0)
+			ok = 0;
+	}
+
+	if (!ok) // 4) never bless a frame that did not land
+	{
+		has_user_image = 0;
+		return;
+	}
+
+	flash_write_page(USER_IMG_FLASH_ADDR, 4, (uint8_t *)&user_image_magic_word);
 	has_user_image = 1;
 }
 
