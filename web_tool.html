@@ -123,6 +123,7 @@ let currentImg = null;                // loaded Image for re-conversion on thres
 let currentBuf = null;                // 4000-byte framebuffer ready to send
 let pendingNotify = null;             // { resolve, timer } for the next OTA notification
 let busy = false;                     // an OTA run is in progress
+let uploading = false;                // an image upload run is in progress
 
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -136,6 +137,58 @@ function hexToBytes(h){
   const b = [];
   for (let c = 0; c < h.length; c += 2) b.push(parseInt(h.substr(c,2),16));
   return new Uint8Array(b);
+}
+
+// ---------------------------------------------------------------------------
+// GATT serialisation (v15.9).
+//
+// Web Bluetooth permits exactly ONE outstanding GATT operation per device.  A
+// second writeValue() issued before the first has been acknowledged throws
+//     NetworkError: GATT operation already in progress
+// and if the link dies underneath it while a response is outstanding:
+//     NotSupportedError: GATT operation failed for unknown reason
+//
+// The tag is a slow peripheral and the EPD characteristic is CHAR_PROP_WRITE
+// (with response - app_att.c), so EVERY one of these leaves an ATT response
+// outstanding for a long time:
+//   * erasing a 4 KB flash sector to persist the page state,
+//   * writing the 4000-byte image back to flash,
+//   * driving a full BWR refresh, which takes seconds.
+// Two quick clicks on "切到图片页" - or one click while an upload is still
+// settling - is all it takes.
+//
+// Every non-OTA write now goes through gattWrite(): the calls are serialised,
+// and the raw DOMException is translated into something the user can act on.
+// (The OTA path keeps its own notification-driven handshake - it is already
+// strictly sequential and must not share this queue.)
+// ---------------------------------------------------------------------------
+let gattChain = Promise.resolve();
+let linkDead = false;
+
+async function gattDoWrite(char, bytes, label){
+  if (linkDead) throw new Error('BLE 链路已断，请点「重连」后再试');
+  try{
+    await char.writeValue(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  }catch(e){
+    const msg = String((e && e.message) || '');
+    if (/already in progress/i.test(msg)){
+      throw new Error('设备还在处理上一笔操作（' + label + '）。它可能正在写 flash 或全屏刷新，' +
+                      '等 2 秒再点一次即可 —— 命令没有丢失，只是排不进去。');
+    }
+    if (e.name === 'NotSupportedError' || e.name === 'NetworkError'){
+      linkDead = true;
+      throw new Error('BLE 链路中断（' + label + '）。设备可能正在重启或全屏刷新，' +
+                      '等几秒后点「重连」，然后按 R3 顺序重试。');
+    }
+    throw e;
+  }
+}
+
+function gattWrite(char, bytes, label){
+  const task = gattChain.then(() => gattDoWrite(char, bytes, label));
+  // keep the chain alive so one failure does not poison every later write
+  gattChain = task.then(() => {}, () => {});
+  return task;
 }
 
 // ===========================================================================
@@ -160,6 +213,11 @@ async function connectWithRetry(dev, attempts){
 function onDisconnected(){
   setConn('已断开');
   log('连接已断开（刚提交完固件时属正常：设备正在重启）');
+  // v15.9: drop the queued writes - they target characteristics of a link that
+  // no longer exists, and replaying them onto the next connection would fire
+  // stale page switches at a device that just rebooted.
+  gattChain = Promise.resolve();
+  linkDead = false;
   otaChar = null; epdChar = null; rxtxChar = null;
   $('flashBtn').disabled = true;
   $('timeBtn').disabled = true;
@@ -441,12 +499,24 @@ async function autoTimeSyncAfterReboot(){
   log('自动校时失败——设备重启可能比预期慢。等几秒后手动重连并点「同步时间」即可。');
 }
 
+// While an OTA is running every other button must be dead.  A stray page switch
+// mid-transfer collides with the OTA handshake on the same ATT pipe, and the
+// device answers cmd 0x01/0x04/0x05 with a notification that the tool throws
+// away when it was not expecting one - i.e. the OTA reply stream desynchronises.
+function setBusyUI(on){
+  $('flashBtn').disabled = on;
+  $('uploadBtn').disabled = on || !epdChar;
+  $('timeBtn').disabled = on || !rxtxChar;
+  document.querySelectorAll('.pageBtn').forEach(b => b.disabled = on || !epdChar);
+  $('nextPageBtn').disabled = on || !epdChar;
+}
+
 async function flashFirmware(){
   if (!otaChar) return setStatus('请先连接设备');
   if (!firmware) return setStatus('请先选择 .bin 固件');
   if (busy) return;
   busy = true;
-  $('flashBtn').disabled = true;
+  setBusyUI(true);
   let stage = '开始';
   try{
     log('=== 开始刷写：' + firmware.length + ' 字节 ===');
@@ -484,6 +554,7 @@ async function flashFirmware(){
     }
   }finally{
     busy = false;
+    setBusyUI(false);
     $('flashBtn').disabled = !(device && device.gatt && device.gatt.connected && otaChar);
   }
 }
@@ -566,24 +637,33 @@ $('invertChk').onchange = reconvert;
 async function sendImage(buf){
   if (!epdChar) throw new Error('未连接 EPD_BLE');
   const h = Array.from(buf, b => ('0'+b.toString(16)).slice(-2)).join('');
-  await epdChar.writeValue(hexToBytes('0000'));   // clear buffer to black
-  await epdChar.writeValue(hexToBytes('020000')); // set byte_pos = 0
+  await gattWrite(epdChar, hexToBytes('0000'), '清屏');   // clear buffer to black
+  await gattWrite(epdChar, hexToBytes('020000'), '置写指针'); // set byte_pos = 0
   for (let off = 0; off < h.length; off += 480){
     const chunk = h.substr(off, 480);             // 240 bytes per write
-    await epdChar.writeValue(hexToBytes('03' + chunk));
+    await gattWrite(epdChar, hexToBytes('03' + chunk), '写像素 ' + (off/480 + 1));
   }
-  await epdChar.writeValue(hexToBytes('01'));      // display + save to flash
+  await gattWrite(epdChar, hexToBytes('01'), '推屏 + 存 flash');
 }
 
 $('uploadBtn').onclick = async () => {
   if (!epdChar) return setStatus('请先连接设备');
   if (!currentBuf) return setStatus('请先载入图片');
+  if (uploading) return;
+  uploading = true;
   try{
     setStatus('上传中...');
     await sendImage(currentBuf);
     setStatus('上传完成');
     log('图片已发送（已立即显示一次并保存到 flash）');
-  }catch(e){ setStatus('上传失败'); log('上传错误: '+e); }
+    // The 0x01 command makes the tag erase the image sector, write 4000 bytes
+    // back and start a full BWR refresh: several seconds during which it cannot
+    // answer a second ATT write.  Say so instead of letting the user discover
+    // it as "GATT operation already in progress".
+    log('设备正在写 flash 并全屏刷新，约需 5 秒。这期间请勿点切页或重复上传；' +
+        '要验证图片是否存住，等屏幕刷新结束后用 NFC 空贴切页，或点一次「切到图片页」。');
+  }catch(e){ setStatus('上传失败'); log('上传错误: '+e.message); }
+  finally{ uploading = false; }
 };
 
 // ===========================================================================
@@ -592,8 +672,8 @@ $('uploadBtn').onclick = async () => {
 async function syncTime(){
   if (!rxtxChar) throw new Error('未连接 RxTx 特征');
   const t = Math.floor(Date.now()/1000) + TZ_OFFSET_SECONDS;
-  await rxtxChar.writeValue(new Uint8Array([0xDD,
-    (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]));
+  await gattWrite(rxtxChar, new Uint8Array([0xDD,
+    (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]), '校时 0xDD');
   // t is already shifted into the tag's local time; render with getUTC* so the
   // browser timezone is not applied a second time.
   const d = new Date(t * 1000);
@@ -606,16 +686,19 @@ $('timeBtn').onclick = async () => {
   try{ setStatus('校时中…'); const when = await syncTime(); setStatus('校时完成');
        log('时间已设置为(价签将显示): ' + when);
        log('屏幕将在下一分钟的整分刷新时显示新时间'); }
-  catch(e){ setStatus('校时失败'); log('校时错误: '+e); }
+  catch(e){ setStatus('校时失败'); log('校时错误: '+e.message); }
 };
 
 async function setPage(n){
   if (!epdChar) return setStatus('请先连接设备');
   try{
-    await epdChar.writeValue(new Uint8Array([0x05, n]));
+    setStatus('切页命令发送中…');
+    await gattWrite(epdChar, new Uint8Array([0x05, n]), '切页 0x05');
     setStatus('已发送切页命令: ' + ({1:'时间页',2:'月历页',3:'图片页'}[n] || n));
     log('切页命令 0x05 页号 ' + n + ' 已发送（设备主循环下一圈执行全屏刷新）');
-  }catch(e){ setStatus('切页失败'); log('切页错误: '+e); }
+    log('全屏刷新需要几秒。若设备此刻正在刷上一帧，命令会在刷新结束后执行，' +
+        '不要重复点击 —— 第二笔 ATT 写入会被拒绝。');
+  }catch(e){ setStatus('切页失败'); log('切页错误: '+e.message); }
 }
 
 document.querySelectorAll('.pageBtn').forEach(b => {
@@ -624,10 +707,11 @@ document.querySelectorAll('.pageBtn').forEach(b => {
 $('nextPageBtn').onclick = async () => {
   if (!epdChar) return setStatus('请先连接设备');
   try{
-    await epdChar.writeValue(new Uint8Array([0x06]));
+    setStatus('发送「下一页」…');
+    await gattWrite(epdChar, new Uint8Array([0x06]), '翻页 0x06');
     setStatus('已发送「下一页」命令');
     log('切页命令 0x06 已发送');
-  }catch(e){ setStatus('切页失败'); log('切页错误: '+e); }
+  }catch(e){ setStatus('切页失败'); log('切页错误: '+e.message); }
 };
 
 // ===========================================================================

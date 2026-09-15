@@ -66,6 +66,10 @@ void page_state_save(uint8_t page);
 void epd_display(uint32_t time_is, uint16_t battery_mv, int16_t temperature, uint8_t full_or_partial, uint8_t page);
 void epd_set_sleep(void);
 uint8_t epd_state_handler(void);
+/* v15.9: non-zero while the panel is still being driven.  app.c must not hand
+ * epd_display() a new frame in that state - it would refuse AND the pending
+ * flags would already have been cleared, so the request would vanish. */
+extern uint8_t epd_update_state;
 void epd_display_char(uint8_t data);
 void epd_clear(void);
 

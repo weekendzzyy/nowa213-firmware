@@ -65,6 +65,41 @@ function hexToBytes(hex){
   return new Uint8Array(b);
 }
 
+// ---------------------------------------------------------------------------
+// GATT serialisation (v15.9) - same fix as web_tool.html, see the long note
+// there.  Web Bluetooth allows ONE outstanding operation per device; the EPD
+// characteristic is write-with-response and the tag stops answering entirely
+// while it erases flash, writes the 4000-byte image back and drives a full BWR
+// refresh.  A second click during that window throws
+//   NetworkError: GATT operation already in progress
+// and can take the link down with
+//   NotSupportedError: GATT operation failed for unknown reason
+// ---------------------------------------------------------------------------
+let gattChain = Promise.resolve();
+
+async function gattDoWrite(char, bytes, label){
+  try{
+    await char.writeValue(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  }catch(e){
+    const msg = String((e && e.message) || '');
+    if (/already in progress/i.test(msg)){
+      throw new Error('设备还在处理上一笔操作（' + label + '）。它可能正在写 flash 或全屏刷新，' +
+                      '等 2 秒再点一次即可。');
+    }
+    if (e.name === 'NotSupportedError' || e.name === 'NetworkError'){
+      throw new Error('BLE 链路中断（' + label + '）。设备可能正在重启或全屏刷新，' +
+                      '等几秒后点「重连」再试。');
+    }
+    throw e;
+  }
+}
+
+function gattWrite(char, bytes, label){
+  const task = gattChain.then(() => gattDoWrite(char, bytes, label));
+  gattChain = task.then(() => {}, () => {});   // survive a failed write
+  return task;
+}
+
 // Resolve the two characteristics from an already-connected GATT server.
 async function setupServices(){
   epdChar = null; rxtxChar = null;
@@ -198,13 +233,14 @@ document.getElementById('loadBtn').onclick = () => {
 async function sendImage(buf){
   if (!epdChar) throw new Error('未连接 EPD_BLE');
   const hex = Array.from(buf, b => ('0'+b.toString(16)).slice(-2)).join('');
-  await epdChar.writeValue(hexToBytes('0000'));   // clear buffer to black
-  await epdChar.writeValue(hexToBytes('020000')); // set byte_pos = 0
+  await gattWrite(epdChar, hexToBytes('0000'), '清屏');    // clear buffer to black
+  await gattWrite(epdChar, hexToBytes('020000'), '置写指针'); // set byte_pos = 0
   for (let off = 0; off < hex.length; off += 480){
     const chunk = hex.substr(off, 480);            // 240 bytes per write
-    await epdChar.writeValue(hexToBytes('03' + chunk));
+    await gattWrite(epdChar, hexToBytes('03' + chunk), '写像素 ' + (off/480 + 1));
   }
-  await epdChar.writeValue(hexToBytes('01'));      // display + save to flash
+  await gattWrite(epdChar, hexToBytes('01'), '推屏 + 存 flash'); // display + save to flash
+  log('设备正在写 flash 并全屏刷新，约需 5 秒 —— 这期间请勿重复点击。');
 }
 
 async function syncTime(){
@@ -212,7 +248,7 @@ async function syncTime(){
   const t = Math.floor(Date.now()/1000) + TZ_OFFSET_SECONDS;
   const cmd = new Uint8Array([0xDD,
     (t>>>24)&0xff, (t>>>16)&0xff, (t>>>8)&0xff, t&0xff]);
-  await rxtxChar.writeValue(cmd);
+  await gattWrite(rxtxChar, cmd, '校时 0xDD');
   // `t` is ALREADY shifted into the tag's local time (firmware applies no offset
   // of its own). Render it back with getUTC* so the browser's own timezone is not
   // applied a second time — otherwise the log shows a double-shifted clock.
@@ -225,28 +261,36 @@ async function syncTime(){
 document.getElementById('connectBtn').onclick = connect;
 document.getElementById('reconnectBtn').onclick = reconnect;
 
+let running = false;   // an upload / upload+sync run is in flight
+
 document.getElementById('uploadBtn').onclick = async () => {
   if (!currentBuf) return setStatus('请先载入图片');
+  if (running) return;
+  running = true;
   try{ setStatus('上传中...'); await sendImage(currentBuf); setStatus('上传完成'); log('图片已发送'); }
-  catch(e){ setStatus('上传失败'); log('上传错误: '+e); }
+  catch(e){ setStatus('上传失败'); log('上传错误: '+e.message); }
+  finally{ running = false; }
 };
 
 document.getElementById('timeBtn').onclick = async () => {
   try{ setStatus('校时中...'); const when = await syncTime(); setStatus('校时完成'); log('时间已设置为(价签将显示): '+when);
        log('屏幕将在下一分钟的整分刷新时显示新时间（或再点一次“上传图片”立即刷新）'); }
-  catch(e){ setStatus('校时失败'); log('校时错误: '+e); }
+  catch(e){ setStatus('校时失败'); log('校时错误: '+e.message); }
 };
 
 document.getElementById('bothBtn').onclick = async () => {
   if (!currentBuf) return setStatus('请先载入图片');
+  if (running) return;
+  running = true;
   try{
     setStatus('上传 + 校时中...');
     await sendImage(currentBuf);
     const when = await syncTime();
     setStatus('上传 + 校时完成');
     log('图片已发送，时间已设置为(价签将显示): '+when);
-    log('注意：v4.0 固件为纯时钟模式，图片只显示一次，下一分钟自动回到时钟');
-  }catch(e){ setStatus('失败'); log('错误: '+e); }
+    log('提示：图片已存 flash。切到图片页可用 NFC 空贴，或 web_tool.html 的切页按钮。');
+  }catch(e){ setStatus('失败'); log('错误: '+e.message); }
+  finally{ running = false; }
 };
 </script>
 </body>

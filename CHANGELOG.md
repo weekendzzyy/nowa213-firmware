@@ -1410,6 +1410,74 @@ advance（笔位）右对齐的，但**笔位对齐不等于墨迹对齐**——
 
 ---
 
+## v15.9-rc2 — 2026-09-15（切页健壮性：ATT 回调里擦 flash + 面板忙时切页请求被吞）
+
+**背景**（用户刷完 rc1 后操作时工具报）：
+```
+切页错误: NetworkError: GATT operation already in progress.
+切页错误: NotSupportedError: GATT operation failed for unknown reason.
+连接已断开（刚提交完固件时属正常：设备正在重启）
+```
+
+**根因（两处固件缺陷叠加，与 rc1 的图片修复无关）**：
+
+1. **`app_set_page()` 在 BLE ATT 写回调里擦整个 flash 扇区。**
+   链路是 `epd_ble_service.c` opcode `0x05`/`0x06` → `app_set_page()` → `page_state_save()`
+   → `flash_erase_sector(PAGE_STATE_FLASH_ADDR)`。SDK 的 `flash_erase_sector()`
+   （`components/drivers/8258/flash.c:91`）全程 `irq_disable()`，4 KB 扇区擦除要几十到几百 ms。
+   这期间**链路层收不到中断、产生不了 ATT 响应**。EPD 特征是 `CHAR_PROP_READ | CHAR_PROP_WRITE`
+   （`app_att.c:153`，**有应答**，没有 Write-Without-Response），所以每一笔写入都必须等 ATT 响应 ——
+   用户在响应回来前再点一次，浏览器就抛 `GATT operation already in progress`；
+   链路被拖死时则是 `NotSupportedError`，随后断连。这条路径自 v15.0 就存在，不是 rc1 引入的。
+
+2. **面板忙时的切页请求被静默丢弃。**
+   `epd_display()` 开头是 `if (epd_update_state) return;`，而 `app.c` 在**调用它之前**就把
+   `page_switch_pending` 清零了。于是"传完图立刻点切页"（BWR 全屏刷新要数秒，
+   `epd_update_state` 一直是 1）会：标志被清 → `epd_display()` 直接返回 → 没有任何东西
+   再触发重绘（图片页的唯一触发源就是这个标志，`app.c` 里 `paint = !first_refresh_done ? 1 : 0`）
+   → **玻璃停在旧页面**，直到下一个整点或午夜。
+
+**修复**（`atc1441_src/Firmware/src/`）：
+
+- `app.c` — `app_set_page()` **不再直接落盘**，改设 `page_save_pending`；
+  `main_loop()` 每圈消费该标志并调用 `page_state_save()`。擦除仍在主循环里同步进行
+  （照样屏蔽中断），但**不再占用 ATT 响应窗口** —— 链路层只在一个没有 pending 应答的时刻被打断。
+- `app.c` — paint 决策新增首分支：`page_switch_pending && epd_update_state` 时**保留标志**、
+  本圈不做任何决策，等面板空闲后的下一圈再执行切页。其余分支行为不变（手术式改动）。
+- `epd.h` — 导出 `extern uint8_t epd_update_state;`，供 `app.c` 判断面板是否仍在驱动。
+
+**工具侧修复**（不在固件镜像里，浏览器 F5 即生效）：
+
+- `web_tool.html` / `web_uploader.html` — 新增 `gattWrite()` 串行队列：所有**非 OTA** 的 GATT
+  写入排队执行，`already in progress` / `NotSupportedError` 被翻译成可操作的中文提示，
+  断连时清空队列（避免把过期的切页命令重放到刚重启的设备上）。
+  **OTA 路径保持自己的通知握手**（`writeOta()` 仍直写）——它已严格串行，
+  且与命令通道混用同一 ATT 管道会让 OTA 的应答流错位。
+- `web_tool.html` — OTA 期间禁用切页/传图/校时按钮；上传结束提示"设备正在写 flash 并全屏刷新，约 5 秒"。
+- `web_uploader.html` — 上传 / 上传+校时按钮加防重入。
+- `web_flasher.html` — **未改**（本次未使用；它没有切页功能，唯一裸写是重启后的校时）。
+
+**验证**：
+
+- 编译 + 链接通过（67/67）；镜像 86856 B；`_end_bss_ = 0x84efa1` **不变**。
+- `tools/verify_v14_layout.py` **81 项 PASS**（UI 未动）。
+- 反汇编核对：`app_set_page` 缩到 **32 B 且不含 `page_state_save` 调用**，只写
+  `current_page` / `page_save_pending` / `page_switch_pending` 三个字节
+  （`.retention_data` 偏移 0/1/2）；`main_loop` 内出现 `tjl page_state_save` 与
+  `epd_update_state` 引用 ⇒ 两处改动都真的进了镜像。
+- 与 rc1 逐字节比对：**40118 处不同**（两者大小恰好都是 86856 B，所以只靠文件名/哈希区分不了，
+  必须 diff —— 已 diff）。
+
+**注意**：`FW_VERSION_STRING` 仍是 `v15.9`（5 字符上限，屏幕上看不出 rc1/rc2）。
+区分靠行为：rc2 上"面板忙时点切页"不会丢命令。
+
+**发布文件**：`firmware_releases/atc1441_3page_v15.9-rc2_2026-09-15_86856B.bin`
+**SHA256**：`038b875e2e8b8fd6d3d8a14028a78a6fe2733d0819f7cddd70a812ff0325b278`
+**大小**：86856 字节
+**SRAM**：`_end_bss_ = 0x84efa1`（余 4191 B）
+
+---
+
 ## v15.9-rc1 — 2026-09-15（修复图片页从 flash 恢复时错乱：flash 写入跨页越界）
 
 **现象**（用户报）：BLE 传图后屏幕显示**完全正常**；用 NFC 切到图片页后图片**显示不正常**——大面积空白，只余零星墨点。

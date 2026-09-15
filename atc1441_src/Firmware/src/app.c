@@ -49,12 +49,25 @@ RAM uint8_t page_switch_pending = 0;
 // necessarily steps at midnight.
 RAM uint8_t day_shown = 0xFF;
 
+// v15.9: which page still needs writing to flash.  See app_set_page().
+RAM uint8_t page_save_pending = 0;
+
 void app_set_page(uint8_t page)
 {
     if (page < PAGE_TIME || page > PAGE_TIME + PAGE_COUNT - 1)
         return;
     current_page = page;
-    page_state_save(page);
+    /* v15.9 - do NOT touch flash here.  This runs inside the BLE ATT-write
+     * callback (epd_ble_service.c opcode 0x05 / 0x06) and page_state_save()
+     * erases a whole 4 KB sector with interrupts disabled.  That is hundreds of
+     * milliseconds in which the link layer cannot be serviced and no ATT
+     * response can be produced, which is exactly what turns a second click on
+     * "切到图片页" into:
+     *     NetworkError: GATT operation already in progress
+     *     NotSupportedError: GATT operation failed for unknown reason
+     * followed by a dropped link.  Flag it and let main_loop persist it, where
+     * a few hundred milliseconds cost nothing and cannot stall the radio. */
+    page_save_pending = 1;
     page_switch_pending = 1;
 }
 
@@ -195,6 +208,15 @@ _attribute_ram_code_ void main_loop(void)
     // flagged here is taken by page_switch_pending in the very same pass.
     nfc_poll();
 
+    // v15.9: persist a page selection made over BLE or NFC.  Deliberately NOT
+    // done in app_set_page() - see the note there: that call runs inside the
+    // ATT-write callback, where a 4 KB sector erase starves the link layer.
+    if (page_save_pending)
+    {
+        page_save_pending = 0;
+        page_state_save(current_page);
+    }
+
     if (time_reached_period(Timer_CH_1, 30))
     {
         battery_mv = get_battery_mv();
@@ -310,7 +332,18 @@ _attribute_ram_code_ void main_loop(void)
         uint8_t paint = 0;
         uint8_t page_full = 0;
 
-        if (page_switch_pending)
+        /* v15.9: a switch asked for while the panel is still driving the
+         * previous frame must survive.  epd_display() returns immediately when
+         * epd_update_state is set, so clearing page_switch_pending now would
+         * throw the request away with nothing left to trigger a repaint - the
+         * glass would sit on the old page until the next midnight or hourly
+         * full refresh.  A BWR full refresh takes seconds, and that is exactly
+         * the window a "刚传完图就点切页" lands in. */
+        if (page_switch_pending && epd_update_state)
+        {
+            /* panel busy - keep the flag, take it on a later pass */
+        }
+        else if (page_switch_pending)
         {
             page_switch_pending = 0;
             paint = 1;
