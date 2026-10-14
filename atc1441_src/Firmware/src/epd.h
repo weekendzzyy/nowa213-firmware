@@ -58,7 +58,15 @@ void epd_display_tiff(uint8_t *pData, int iSize);
 
 /* v15.0: how often the calendar page re-drives its voltage band.  Kept here
  * rather than in epd_layout.h because app.c needs it, and app.c must not
- * include epd_layout.h - that would duplicate the generated DSEG bitmap. */
+ * include epd_layout.h - that would duplicate the generated DSEG bitmap.
+ *
+ * v15.9-rc3: CURRENTLY UNUSED.  That band tick was the calendar page's only
+ * partial refresh, and the single-colour partial waveform does not re-drive
+ * red - on-device it scrubbed the enlarged red today-date off the glass a few
+ * hours after each full refresh (2026-10-14).  app.c no longer schedules it:
+ * the page repaints at midnight only.  The constant is kept rather than
+ * deleted so the interval does not have to be re-chosen if the red-layer
+ * waveform question is ever solved.  See EPD_CAL_BWR_PARTIAL in epd.c. */
 #define CAL_VOLT_REFRESH_HOURS 2
 uint8_t page_state_load(void);
 void page_state_save(uint8_t page);

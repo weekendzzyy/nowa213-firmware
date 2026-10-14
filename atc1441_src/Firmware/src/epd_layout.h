@@ -320,7 +320,16 @@
  *   * the band also crosses the enlarged "13日", so the red frame has to be
  *     rebuilt too.  Whether the (single-colour) partial waveform re-drives RED
  *     correctly is unverified on this panel - EPD_CAL_BWR_PARTIAL switches the
- *     page back to full refreshes if it turns out it does not. */
+ *     page back to full refreshes if it turns out it does not.
+ *
+ * v15.9-rc3: IT DOES NOT.  Measured 2026-10-14 - the red today-date vanished
+ * after a few hours while the red weekend numerals in the grid (glass x < 161,
+ * outside the band) survived, which is the signature of a window scrubbing the
+ * red it drives over.  The band is dead: app.c repaints the page at midnight
+ * only, EPD_CAL_BWR_PARTIAL is 0.  The constants below are kept, unused, so
+ * the window geometry does not have to be re-derived if the red-layer partial
+ * waveform is ever solved - and the compile-time guard on CAL_WIN_GATE_LAST
+ * still documents the SSD1680 gate limit. */
 /* CAL_VOLT_REFRESH_HOURS lives in epd.h - app.c needs it for its event
  * dispatch and must not pull this header in (it would duplicate the DSEG
  * bitmap in flash). */

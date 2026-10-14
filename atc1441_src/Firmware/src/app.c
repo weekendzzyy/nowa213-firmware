@@ -367,16 +367,37 @@ _attribute_ram_code_ void main_loop(void)
                 paint = 1;
                 page_full = 1;
             }
-            else if (hour_changed && !night &&
-                     (current_hour % CAL_VOLT_REFRESH_HOURS) == 0)
-            {
-                /* v15.0: refresh just the voltage band, every
-                 * CAL_VOLT_REFRESH_HOURS, so the reading is not a day old.
-                 * PARTIAL - which only saves the gate scan here, both frames
-                 * are still sent.  See EPD_CAL_BWR_PARTIAL in epd.c. */
-                paint = 1;
-                page_full = 0;
-            }
+            /* ---- v15.9-rc3: the 2-hour voltage-band PARTIAL tick is GONE ----
+             * It was the only partial refresh this page ever took, and it
+             * destroyed the red layer.  On-device result (2026-10-14): the
+             * enlarged red "14日" in the info column vanished a few hours
+             * after each full refresh.
+             *
+             * Why it could not work - geometry:
+             *   the band is a full-height vertical strip, glass x 183..230
+             *   (CAL_VOLT_X, CAL_VOLT_ADV), because SSD1680 selects DRIVEN
+             *   GATES and the gate axis on this panel is the horizontal one.
+             *   The red "14日" at 250% spans x 179..234.  So 48 of its 56 px
+             *   sit inside the band - the window cannot be moved off the date
+             *   without moving it off the voltage, both are centred in an
+             *   85 px info column.
+             *
+             * Why it could not work - waveform:
+             *   EPD_BWR_213_Activate(partial) loads LUT_bwr_213_part, a
+             *   SINGLE-COLOUR (black/white) waveform inherited from the BW213
+             *   lineage.  v15.0 shipped this path with the risk written down
+             *   as unverified ("a faint 3日 after a 2-hour tick is the symptom
+             *   that would condemn it").  It is now condemned by measurement.
+             *
+             * The page is therefore repainted at midnight ONLY (plus a page
+             * switch, which is always full anyway).  A midnight repaint is
+             * FULL, so both RAMs are rewritten and the red comes back.  The
+             * cost is that the voltage reading is up to a day old, which is
+             * immaterial for a value that moves a few mV per day.
+             *
+             * EPD_CAL_BWR_PARTIAL is 0 in epd.c to match; the CAL_WIN_* gate
+             * constants stay in epd_layout.h so this can be re-derived rather
+             * than re-guessed if the red-layer waveform is ever solved. */
             if (!first_refresh_done)
             {
                 paint = 1;

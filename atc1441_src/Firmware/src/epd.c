@@ -55,12 +55,24 @@ extern const uint8_t ucMirror[];
  */
 #define EPD_USE_REFRESH_DEBUG 0
 
-/* v15.0: 1 = the calendar page re-drives only the voltage band every
- * CAL_VOLT_REFRESH_HOURS, instead of rebuilding the whole panel.  Set to 0 to
- * go back to full refreshes: whether the single-colour partial waveform
- * re-drives the RED layer correctly is unverified on this panel, and a faint
- * "3日" after a 2-hour tick is the symptom that would condemn it. */
-#define EPD_CAL_BWR_PARTIAL 1
+/* v15.9-rc3: 0 = the calendar page always gets a FULL panel refresh.
+ *
+ * v15.0 shipped this as 1 (a 2-hour voltage-band partial tick) with the risk
+ * explicitly recorded as unverified: "whether the single-colour partial
+ * waveform re-drives the RED layer correctly is unverified on this panel, and
+ * a faint 3日 after a 2-hour tick is the symptom that would condemn it".
+ *
+ * That symptom is what was reported on 2026-10-14: the enlarged red today-date
+ * in the info column disappears after the tag has been running a while, while
+ * the red weekend numerals inside the grid survive - which is exactly the
+ * fingerprint of a partial window, since the grid (glass x < 161) lies outside
+ * the voltage band (glass x 183..230) and the date (x 179..234) does not.
+ * The partial waveform does not re-drive red, so the band scrubbed it away.
+ *
+ * app.c no longer triggers the partial tick at all; this switch is kept as the
+ * second line of defence and as the single place to re-enable the path if the
+ * red-layer waveform question is ever solved. */
+#define EPD_CAL_BWR_PARTIAL 0
 
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 = BWR350
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR350", "BWY350"};
@@ -861,8 +873,11 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
         int size = resolution_w * resolution_h / 8;
         /* EPD_BWR_213_Begin/Activate take 0 = gate-windowed (partial),
          * non-zero = full panel.  full_or_partial == 1 means a page switch or
-         * midnight full refresh; otherwise we are in the 2-hour voltage-band
-         * tick.  EPD_CAL_BWR_PARTIAL switches that tick to windowed. */
+         * midnight full refresh.  v15.9-rc3: that is now the ONLY way this page
+         * is ever painted, because app.c dropped the 2-hour voltage-band tick -
+         * so in practice cal_full is always 1.  The expression is kept (rather
+         * than replaced by a literal) so the windowed path stays one macro away
+         * if the red-layer partial waveform is ever solved. */
         uint8_t cal_full = full_or_partial ? 1
                            : (EPD_CAL_BWR_PARTIAL ? 0 : 1);
 
@@ -885,11 +900,17 @@ _attribute_ram_code_ void epd_display(uint32_t time_is, uint16_t battery_mv, int
             gpio_write(EPD_RESET, 1);
             WaitMs(10);
 
-            /* The band this partial refresh drives is the VOLTAGE one, not the
-             * time page's minute digits - that is what gate_first/gates are
-             * for.  Both frames are still sent in full: only the driven gate
-             * range shrinks, so a wrong window cannot tear the page, it can
-             * only fail to update. */
+            /* gate_first/gates select the band this call drives.  With
+             * EPD_CAL_BWR_PARTIAL == 0 they are dead arguments - the full path
+             * ignores them and drives all 296 gates - but they stay wired to
+             * CAL_WIN_* so re-enabling the band needs no new geometry.
+             *
+             * Note what a window can and cannot do here: both frames are
+             * ALWAYS sent in full, only the driven gate range shrinks, so a
+             * wrong window can never tear the page - but it does not protect
+             * the pixels inside it either, which is precisely why the red date
+             * had to be moved out of the picture rather than away from the
+             * window. */
             t2 = EPD_BWR_213_Begin(cal_full, CAL_WIN_GATE_FIRST,
                                    CAL_WIN_GATES);
             EPD_BWR_213_Load(epd_buffer, size, 0x24);
